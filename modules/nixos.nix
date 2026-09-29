@@ -100,6 +100,9 @@ in
     (mkIf cfg.mcpWrapper.enable {
       environment.systemPackages = [
         (pkgs.writeShellScriptBin "codex-computer-use" ''
+          # Apps launched through the MCP server open without taking focus
+          # (honoured by niri with agentInput).
+          export NIRI_AGENT_LAUNCH=1
           exec ${cfg.package}/${pluginDir}/bin/codex-computer-use-linux "$@"
         '')
       ];

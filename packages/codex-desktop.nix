@@ -81,6 +81,7 @@ let
   #   codex-computer-use mcp
   # It runs the exact binary bundled into `desktop`, so both share one build.
   wrapper = pkgs.writeShellScriptBin "codex-computer-use" ''
+    export NIRI_AGENT_LAUNCH=1
     exec ${desktop}/${pluginDir}/bin/codex-computer-use-linux "$@"
   '';
 in

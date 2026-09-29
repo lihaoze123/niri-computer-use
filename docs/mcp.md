@@ -50,6 +50,14 @@ nix run github:lihaoze123/niri-computer-use#codex-computer-use -- mcp
 
 带窗口目标（`window_id`、`app_id` 等）的 `screenshot`、`click`、`scroll`、`drag`、`press_key`、`type_text` 不会激活窗口，也不移动你的鼠标；结果消息会写明 "through niri agent input"。若你正在使用目标窗口所在的程序，调用会被拒绝（`target client holds the real pointer/keyboard focus`），这是有意为之：同一客户端无法区分两路输入。建议让 agent 使用单独的浏览器 profile/进程。
 
+### 让 agent 启动的程序不抢焦点
+
+`codex-computer-use` 已设置 `NIRI_AGENT_LAUNCH=1`。若希望 Claude Code 通过 Bash 启动的程序也不抢焦点，在 `~/.claude/settings.json` 中加入：
+
+```json
+{ "env": { "NIRI_AGENT_LAUNCH": "1" } }
+```
+
 ## 使用建议
 
 - 每轮使用 Computer Use 前先调用 `get_app_state`；诊断报告可访问性关闭时调用 `setup_accessibility`。

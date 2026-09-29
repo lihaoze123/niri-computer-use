@@ -120,10 +120,10 @@ index 0aa3cb4..a3b4682 100644
      /// Information about connected outputs.
 diff --git a/src/agent_input.rs b/src/agent_input.rs
 new file mode 100644
-index 0000000..493d0b2
+index 0000000..d06b5bf
 --- /dev/null
 +++ b/src/agent_input.rs
-@@ -0,0 +1,627 @@
+@@ -0,0 +1,837 @@
 +//! Per-client "virtual focus" input for computer-use agents.
 +//!
 +//! Wayland input objects are per client: every client has its own `wl_pointer` and `wl_keyboard`
@@ -142,11 +142,13 @@ index 0000000..493d0b2
 +use smithay::reexports::wayland_server::protocol::wl_pointer::{Axis, ButtonState};
 +use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 +use smithay::reexports::wayland_server::backend::ClientId;
-+use smithay::reexports::wayland_server::{Client, Resource};
++use smithay::reexports::wayland_server::{Client, DisplayHandle, Resource};
 +use std::collections::{HashMap, VecDeque};
 +use std::time::{Duration, Instant};
 +
++use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 +use smithay::utils::{IsAlive, Logical, Point, Serial, SERIAL_COUNTER};
++use smithay::wayland::compositor::{with_surface_tree_downward, SurfaceAttributes, TraversalAction};
 +
 +use crate::niri::State;
 +use tracing::warn;
@@ -172,10 +174,71 @@ index 0000000..493d0b2
 +    keyboard_stale: bool,
 +    /// Client of the real keyboard focus.
 +    real_keyboard_client: Option<ClientId>,
++    /// Screenshots waiting for their window to finish drawing.
++    shots: Vec<PendingShot>,
++    next_shot: u64,
++    /// Windows (by id) that receive paced frame callbacks until the given time, even when not
++    /// visible, so agent input and screenshots see up-to-date content.
++    pumped: HashMap<u64, Instant>,
++    pump_running: bool,
++}
++
++#[derive(Debug)]
++struct PendingShot {
++    id: u64,
++    root: WlSurface,
++    window_id: u64,
++    path: String,
++    show_pointer: bool,
++    done: async_channel::Sender<Result<AgentScreenshotInfo, String>>,
++    started: Instant,
++    last_commit: Instant,
 +}
 +
 +/// A client counts as agent-driven for this long after its last agent input.
 +const AGENT_DRIVEN_TIMEOUT: Duration = Duration::from_secs(30);
++
++/// Frame callbacks are paced for windows touched by the agent for this long.
++const AGENT_PUMP_DURATION: Duration = Duration::from_secs(2);
++/// Frame callback interval of the pump (about 60 Hz).
++const AGENT_PUMP_INTERVAL: Duration = Duration::from_millis(16);
++/// A screenshot is taken once the window has not committed for this long...
++const AGENT_SHOT_QUIET: Duration = Duration::from_millis(50);
++/// ...or after this long at most.
++const AGENT_SHOT_MAX_WAIT: Duration = Duration::from_millis(500);
++
++/// Environment variable marking processes launched by an agent. Their windows (and those of
++/// their descendants, which inherit the environment) open without taking focus.
++const AGENT_LAUNCH_ENV: &[u8] = b"NIRI_AGENT_LAUNCH=1";
++
++/// Whether the client process was started with `NIRI_AGENT_LAUNCH=1`.
++pub fn is_agent_launched(client: &Client, dh: &DisplayHandle) -> bool {
++    let Ok(credentials) = client.get_credentials(dh) else {
++        return false;
++    };
++    let Ok(environ) = std::fs::read(format!("/proc/{}/environ", credentials.pid)) else {
++        return false;
++    };
++    environ.split(|b| *b == 0).any(|var| var == AGENT_LAUNCH_ENV)
++}
++
++/// Whether a surface tree has frame callbacks queued, i.e. the client is waiting to draw.
++fn has_pending_frame_callbacks(root: &WlSurface) -> bool {
++    let pending = std::cell::Cell::new(false);
++    with_surface_tree_downward(
++        root,
++        (),
++        |_, _, _| TraversalAction::DoChildren(()),
++        |_, states, _| {
++            let mut attrs = states.cached_state.get::<SurfaceAttributes>();
++            if !attrs.current().frame_callbacks.is_empty() {
++                pending.set(true);
++            }
++        },
++        |_, _, _| !pending.get(),
++    );
++    pending.get()
++}
 +
 +impl AgentInputState {
 +    fn next_serial(&mut self) -> u32 {
@@ -420,6 +483,9 @@ index 0000000..493d0b2
 +            }
 +        }
 +
++        // Let the window draw the result promptly even if it is off-screen.
++        self.agent_pump_window(window_id);
++
 +        Ok(())
 +    }
 +
@@ -655,9 +721,153 @@ index 0000000..493d0b2
 +        Ok(KeymapFile::new(&keymap))
 +    }
 +
-+    /// Render a window and write it as PNG from a worker thread, without the clipboard and
-+    /// notification side effects of the regular screenshot action. `done` receives the result.
++    /// Screenshot a window without the clipboard and notification side effects of the regular
++    /// screenshot action. `done` receives the result.
++    ///
++    /// Windows that are not visible only get frame callbacks about once per second, and an
++    /// app may need several frames to show the result of input (key -> pty -> echo -> redraw).
++    /// Agent-touched windows are therefore pumped with frame callbacks at ~60 Hz, and the
++    /// screenshot is taken once the window stops committing (or after a maximum wait).
 +    pub fn agent_screenshot(
++        &mut self,
++        window_id: u64,
++        path: String,
++        show_pointer: bool,
++        done: async_channel::Sender<Result<AgentScreenshotInfo, String>>,
++    ) -> Result<(), String> {
++        let root = self
++            .niri
++            .layout
++            .windows()
++            .find(|(mon, m)| m.id().get() == window_id && mon.is_some())
++            .map(|(_, m)| m.toplevel().wl_surface().clone())
++            .ok_or_else(|| format!("no window with id {window_id} on an output"))?;
++
++        let recently_pumped = self.niri.agent_input.pumped.contains_key(&window_id);
++        if !recently_pumped && !has_pending_frame_callbacks(&root) {
++            // Idle window: its current buffer is up to date.
++            return self.agent_render_screenshot(window_id, path, show_pointer, done);
++        }
++
++        self.agent_pump_window(window_id);
++
++        let now = Instant::now();
++        let state = &mut self.niri.agent_input;
++        let id = state.next_shot;
++        state.next_shot += 1;
++        state.shots.push(PendingShot {
++            id,
++            root,
++            window_id,
++            path,
++            show_pointer,
++            done,
++            started: now,
++            last_commit: now,
++        });
++        self.niri
++            .event_loop
++            .insert_source(Timer::from_duration(AGENT_SHOT_QUIET), move |_, _, state| {
++                if state.agent_try_complete_shot(id) {
++                    TimeoutAction::Drop
++                } else {
++                    TimeoutAction::ToDuration(AGENT_PUMP_INTERVAL)
++                }
++            })
++            .map_err(|err| format!("error scheduling agent screenshot: {err}"))?;
++        Ok(())
++    }
++
++    /// Called for every non-sync commit.
++    pub fn agent_root_committed(&mut self, root: &WlSurface) {
++        let now = Instant::now();
++        for shot in &mut self.niri.agent_input.shots {
++            if &shot.root == root {
++                shot.last_commit = now;
++            }
++        }
++    }
++
++    /// Take the screenshot if the window has gone quiet or waited long enough. Returns whether
++    /// the shot is finished.
++    fn agent_try_complete_shot(&mut self, id: u64) -> bool {
++        let shots = &mut self.niri.agent_input.shots;
++        let Some(index) = shots.iter().position(|s| s.id == id) else {
++            return true;
++        };
++        let shot = &shots[index];
++        if shot.last_commit.elapsed() < AGENT_SHOT_QUIET
++            && shot.started.elapsed() < AGENT_SHOT_MAX_WAIT
++        {
++            return false;
++        }
++        let shot = shots.remove(index);
++        let done = shot.done.clone();
++        if let Err(err) =
++            self.agent_render_screenshot(shot.window_id, shot.path, shot.show_pointer, shot.done)
++        {
++            let _ = done.send_blocking(Err(err));
++        }
++        true
++    }
++
++    /// Keep sending paced frame callbacks to a window for a while, visible or not.
++    pub fn agent_pump_window(&mut self, window_id: u64) {
++        let state = &mut self.niri.agent_input;
++        state
++            .pumped
++            .insert(window_id, Instant::now() + AGENT_PUMP_DURATION);
++        if state.pump_running {
++            return;
++        }
++        state.pump_running = true;
++        self.agent_pump_tick();
++        let result = self.niri.event_loop.insert_source(
++            Timer::from_duration(AGENT_PUMP_INTERVAL),
++            |_, _, state| {
++                if state.agent_pump_tick() {
++                    TimeoutAction::ToDuration(AGENT_PUMP_INTERVAL)
++                } else {
++                    state.niri.agent_input.pump_running = false;
++                    TimeoutAction::Drop
++                }
++            },
++        );
++        if let Err(err) = result {
++            warn!("error scheduling agent frame pump: {err}");
++            self.niri.agent_input.pump_running = false;
++        }
++    }
++
++    /// Send frame callbacks to pumped windows. Returns whether any window is still pumped.
++    fn agent_pump_tick(&mut self) -> bool {
++        let now = Instant::now();
++        self.niri.agent_input.pumped.retain(|_, until| *until > now);
++        if self.niri.agent_input.pumped.is_empty() {
++            return false;
++        }
++        let pumped = &self.niri.agent_input.pumped;
++        let time = get_monotonic_time();
++        for (mon, mapped) in self.niri.layout.windows() {
++            if !pumped.contains_key(&mapped.id().get()) {
++                continue;
++            }
++            let Some(output) = mon.map(|mon| mon.output()) else {
++                continue;
++            };
++            // The throttle keeps this from doubling up with regular vblank frame callbacks.
++            mapped.window.send_frame(
++                output,
++                time,
++                Some(AGENT_PUMP_INTERVAL - Duration::from_millis(1)),
++                |_, _| Some(output.clone()),
++            );
++        }
++        true
++    }
++
++    /// Render a window and write it as PNG from a worker thread.
++    fn agent_render_screenshot(
 +        &mut self,
 +        window_id: u64,
 +        path: String,
@@ -752,10 +962,19 @@ index 0000000..493d0b2
 +    }
 +}
 diff --git a/src/handlers/compositor.rs b/src/handlers/compositor.rs
-index f38b293..b27cf72 100644
+index f38b293..cf73251 100644
 --- a/src/handlers/compositor.rs
 +++ b/src/handlers/compositor.rs
-@@ -163,6 +163,12 @@ impl CompositorHandler for State {
+@@ -76,6 +76,8 @@ impl CompositorHandler for State {
+             return;
+         }
+ 
++        self.agent_root_committed(&root_surface);
++
+         if surface == &root_surface {
+             // This is a root surface commit. It might have mapped a previously-unmapped toplevel.
+             if let Entry::Occupied(entry) = self.niri.unmapped_windows.entry(surface.clone()) {
+@@ -163,6 +165,12 @@ impl CompositorHandler for State {
                          // requesting activation and mapping.
                          let token = activation_token_data.filter(|token| {
                              token.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT
@@ -768,15 +987,20 @@ index f38b293..b27cf72 100644
                          });
                          if token.is_some() {
                              ActivateWindow::Yes
-@@ -176,6 +182,26 @@ impl CompositorHandler for State {
+@@ -176,6 +184,31 @@ impl CompositorHandler for State {
                          }
                      });
  
-+                    // New windows of a client driven by agent input don't take the user's focus,
++                    // New windows of a client driven by agent input, or launched by an agent
++                    // (NIRI_AGENT_LAUNCH=1 in its environment), don't take the user's focus,
 +                    // unless the user is working in that client.
 +                    let activate = match surface.client() {
 +                        Some(client)
-+                            if self.niri.agent_input.is_agent_driven(&client)
++                            if (self.niri.agent_input.is_agent_driven(&client)
++                                || crate::agent_input::is_agent_launched(
++                                    &client,
++                                    &self.niri.display_handle,
++                                ))
 +                                && !self
 +                                    .niri
 +                                    .seat

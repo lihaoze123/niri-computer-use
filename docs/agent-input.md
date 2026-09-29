@@ -44,10 +44,12 @@ smithay 公开的 `PointerHandle::client_pointers` / `KeyboardHandle::client_key
 | Chromium 用 agent 点击的 serial 申请 xdg-activation | niri 记录 agent 发出的 serial，此类请求降级为 urgent |
 | 已降级为 urgent 的激活 token 仍让新窗口聚焦（niri 原有问题） | 修正：urgency-only token 不聚焦新窗口 |
 | agent 驱动的客户端打开新窗口 | 最近 30 秒收到过 agent 输入、且不是你当前使用的客户端时不聚焦 |
+| agent 启动的新程序打开窗口时抢焦点 | 进程环境里有 `NIRI_AGENT_LAUNCH=1`（及其所有子进程，环境变量会继承）时，新窗口不获得焦点。`codex-computer-use` 包装脚本自动设置；也可以在 Claude Code 的 `settings.json` `env` 中设置，覆盖 agent 通过 shell 启动的程序 |
 | 菜单/下拉（xdg_popup）grab 被 niri 拒绝 | grab serial 来自 agent 时：保持映射、不做 seat grab；agent 键盘进入 popup；agent 点击 popup 外时关闭 |
 | 真实指针/键盘焦点经过 agent 的客户端后，客户端认为焦点已离开 | 检测 `pointer.last_enter()` 变化与键盘 `focus_changed`，下次 agent 操作前重新 enter |
 | 键盘布局没有的字符 | `Keymap`：仅对目标客户端临时发送含这些字符的 keymap，输完立即恢复；`CtrlShiftU`：Chromium 使用（临时 keymap 曾让 Edge 在 contenteditable 中 SIGILL） |
 | `screenshot-window` 弹通知、覆盖剪贴板 | `AgentScreenshot` 只写文件 |
+| 屏幕外的窗口每秒只收到约 1 次帧回调，agent 操作后截图是旧画面 | agent 输入或截图过的窗口在 2 秒内按约 60 Hz 补发帧回调（帧泵）；截图等窗口 50 ms 无新提交（最多 500 ms）再截。空闲窗口立即截图 |
 
 ## 已知限制
 
@@ -55,5 +57,6 @@ smithay 公开的 `PointerHandle::client_pointers` / `KeyboardHandle::client_key
 - agent 窗口里剪贴板不可用（`set_selection` 需要真实键盘焦点），文本请用 `type_text`。
 - 不支持 Wayland DnD（`start_drag` 校验 seat grab serial）；应用内部的按住拖拽可用。
 - 少数应用若只看 `xdg_toplevel` 的 activated 状态处理输入，可能不响应；kitty、GTK4、Chromium 已验证可用。
-- agent 新**启动**的程序第一次打开窗口时仍会聚焦（它此前没收到过 agent 输入）。
+- 单实例应用（默认的 ghostty、Edge 同一 profile 等）的新窗口由已有进程创建，读不到 agent 的环境变量，仍会按原规则聚焦。
+- 截图最多等待 500 ms；持续动画的窗口会等满 500 ms。
 - 嵌套测试中，嵌套 niri 窗口若在宿主上不可见，宿主会把帧回调限到约 1 Hz，所有操作变慢；这是测试环境现象。

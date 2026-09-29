@@ -44,5 +44,8 @@
   - `AgentScreenshot`：D-Bus 上无 `Notify` 调用，剪贴板保持不变。
   - `Text`：kitty 中 ASCII、中文、emoji 经临时 per-client keymap 完整输入；Edge 中中文/emoji 经 Ctrl+Shift+U 输入，无崩溃。
   - 补丁版后端经 stdio MCP：`screenshot`（来源 `niri-agent-window`）、相对坐标 `click`、`type_text`、`press_key` 均不改变真实焦点，无通知。
+- 实机（重新登录后的补丁版 niri）经 Claude Code `linux-cua`：对后台 kitty/ghostty 的 `screenshot`、`type_text`（含中文、emoji）、`press_key` 均成功，焦点始终在用户的 ghostty，无通知、剪贴板不变。同一 ghostty 进程的另一窗口被拒绝（同一客户端），独立进程（`--gtk-single-instance=false`）的窗口可用。
+- 发现屏幕外窗口在输入后立即截图得到旧画面（niri 对不可见窗口约 1 Hz 发帧回调）。加入帧泵与"等待无新提交"后，在嵌套 niri 中对屏幕外 kitty 输入后立即截图即显示新内容，截图耗时约 270 ms（debug 构建，空闲截图约 200 ms）。
+- `NIRI_AGENT_LAUNCH=1`：嵌套 niri 中带标记直接启动的 kitty、经 `sh` 子进程启动的 kitty 均不获得焦点，无标记的对照组照常获得焦点。
 - 整理为独立 flake 后，`codex-desktop` 的输出路径与原配置中的构建完全一致
   （`/nix/store/ri5b24d20g0f9b8l25m0nzgpprvllhjz-codex-desktop-computer-use-linux-26.917.61114`）。
