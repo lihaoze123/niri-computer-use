@@ -1,0 +1,961 @@
+diff --git a/niri-ipc/src/lib.rs b/niri-ipc/src/lib.rs
+index 0aa3cb4..a3b4682 100644
+--- a/niri-ipc/src/lib.rs
++++ b/niri-ipc/src/lib.rs
+@@ -119,6 +119,106 @@ pub enum Request {
+     OverviewState,
+     /// Request information about screencasts.
+     Casts,
++    /// Deliver input to one window's client without changing the seat focus.
++    ///
++    /// Events are sent directly to the client's own `wl_pointer`/`wl_keyboard` objects. The
++    /// compositor's pointer location, cursor image, keyboard focus and window activation are left
++    /// untouched, so other clients see nothing. Refused if the target client currently holds the
++    /// real pointer or keyboard focus.
++    AgentInput {
++        /// Id of the target window.
++        window_id: u64,
++        /// Events to deliver, in order.
++        events: Vec<AgentEvent>,
++    },
++    /// Screenshot one window to a PNG file with no side effects.
++    ///
++    /// Unlike the `ScreenshotWindow` action, this neither shows a notification nor replaces the
++    /// clipboard selection. Replies after the file has been written.
++    AgentScreenshot {
++        /// Id of the window.
++        window_id: u64,
++        /// Absolute output path.
++        path: String,
++        /// Whether to include the pointer if it is over the window.
++        show_pointer: bool,
++    },
++}
++
++/// How [`AgentEvent::Text`] enters characters missing from the seat keymap.
++#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
++#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
++pub enum AgentUnicodeInput {
++    /// Send a temporary keymap with those characters to the target client only, then restore the
++    /// seat keymap.
++    #[default]
++    Keymap,
++    /// Ctrl+Shift+U, the hexadecimal code point, Space (GTK/Chromium Unicode entry).
++    CtrlShiftU,
++}
++
++/// Geometry of an [`Request::AgentScreenshot`] image.
++#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
++#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
++pub struct AgentScreenshotInfo {
++    /// Image width in physical pixels.
++    pub width: u32,
++    /// Image height in physical pixels.
++    pub height: u32,
++    /// Output scale: physical pixels per logical pixel.
++    pub scale: f64,
++    /// Window geometry origin inside the image, in physical pixels. `AgentEvent::Motion`
++    /// coordinates are `(image_px - geometry_px) / scale`.
++    pub geometry_x: i32,
++    /// See `geometry_x`.
++    pub geometry_y: i32,
++}
++
++/// Event for [`Request::AgentInput`].
++#[derive(Debug, Serialize, Deserialize, Clone)]
++#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
++pub enum AgentEvent {
++    /// Move the agent pointer to window-geometry-relative logical coordinates.
++    Motion {
++        /// X coordinate.
++        x: f64,
++        /// Y coordinate.
++        y: f64,
++    },
++    /// Press or release a pointer button (evdev code, e.g. 272 for left).
++    Button {
++        /// Button code.
++        button: u32,
++        /// Pressed or released.
++        pressed: bool,
++    },
++    /// Scroll by the given logical amounts.
++    Axis {
++        /// Vertical scroll amount.
++        vertical: f64,
++        /// Horizontal scroll amount.
++        horizontal: f64,
++    },
++    /// Press or release a key (evdev keycode, e.g. 30 for A).
++    Key {
++        /// Evdev keycode.
++        keycode: u32,
++        /// Pressed or released.
++        pressed: bool,
++    },
++    /// Type text. Characters present in the seat keymap are typed with their keys (and Shift);
++    /// the others with `unicode_input`.
++    Text {
++        /// Text to type.
++        text: String,
++        /// How to enter characters that the seat keymap lacks.
++        #[serde(default)]
++        unicode_input: AgentUnicodeInput,
++    },
++    /// Send pointer leave to the surface the agent pointer is on.
++    PointerLeave,
++    /// Send keyboard leave to the surface the agent keyboard is on.
++    KeyboardLeave,
+ }
+ 
+ /// Reply from niri to client.
+@@ -137,6 +237,8 @@ pub type Reply = Result<Response, String>;
+ pub enum Response {
+     /// A request that does not need a response was handled successfully.
+     Handled,
++    /// Result of [`Request::AgentScreenshot`].
++    AgentScreenshot(AgentScreenshotInfo),
+     /// The version string for the running niri instance.
+     Version(String),
+     /// Information about connected outputs.
+diff --git a/src/agent_input.rs b/src/agent_input.rs
+new file mode 100644
+index 0000000..493d0b2
+--- /dev/null
++++ b/src/agent_input.rs
+@@ -0,0 +1,627 @@
++//! Per-client "virtual focus" input for computer-use agents.
++//!
++//! Wayland input objects are per client: every client has its own `wl_pointer` and `wl_keyboard`
++//! and only sees events sent to them. This module sends enter/motion/button/key events straight to
++//! the target client's objects without touching the seat's pointer location, cursor, keyboard
++//! focus or window activation. Other clients (including the one the user is working in) receive
++//! nothing, so the user's pointer and focus stay where they are.
++//!
++//! Protocol events carry no surface after `enter`, so a client cannot distinguish two focus
++//! streams. Input is therefore refused while the target client holds the real seat focus.
++
++use niri_ipc::{AgentEvent, AgentScreenshotInfo, AgentUnicodeInput};
++use smithay::desktop::{find_popup_root_surface, PopupKind, PopupManager, WindowSurfaceType};
++use smithay::input::keyboard::{xkb, KeymapFile, Keycode};
++use smithay::reexports::wayland_server::protocol::wl_keyboard::{KeyState, KeymapFormat};
++use smithay::reexports::wayland_server::protocol::wl_pointer::{Axis, ButtonState};
++use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
++use smithay::reexports::wayland_server::backend::ClientId;
++use smithay::reexports::wayland_server::{Client, Resource};
++use std::collections::{HashMap, VecDeque};
++use std::time::{Duration, Instant};
++
++use smithay::utils::{IsAlive, Logical, Point, Serial, SERIAL_COUNTER};
++
++use crate::niri::State;
++use tracing::warn;
++use crate::utils::get_monotonic_time;
++
++#[derive(Debug, Default)]
++pub struct AgentInputState {
++    /// Surface the agent pointer has entered.
++    pointer: Option<WlSurface>,
++    /// Surface the agent keyboard has entered, and its pressed evdev keycodes.
++    keyboard: Option<(WlSurface, Vec<u32>)>,
++    /// Recently issued agent serials. Clients reuse input serials to request xdg-activation;
++    /// those requests must not move the user's focus.
++    serials: VecDeque<Serial>,
++    /// Popups opened by agent input. They are mapped without a seat grab.
++    popups: Vec<PopupKind>,
++    /// When each client last received agent input.
++    clients: HashMap<ClientId, Instant>,
++    /// Real pointer `last_enter` serial at the time of the agent pointer enter. If it changes,
++    /// the real pointer may have entered and left the agent's client, so enter again.
++    pointer_real_enter: Option<Serial>,
++    /// Real keyboard focus touched the agent keyboard's client; enter again before keys.
++    keyboard_stale: bool,
++    /// Client of the real keyboard focus.
++    real_keyboard_client: Option<ClientId>,
++}
++
++/// A client counts as agent-driven for this long after its last agent input.
++const AGENT_DRIVEN_TIMEOUT: Duration = Duration::from_secs(30);
++
++impl AgentInputState {
++    fn next_serial(&mut self) -> u32 {
++        let serial = SERIAL_COUNTER.next_serial();
++        if self.serials.len() == 1024 {
++            self.serials.pop_front();
++        }
++        self.serials.push_back(serial);
++        serial.into()
++    }
++
++    /// Whether `serial` was sent to a client by agent input.
++    pub fn issued(&self, serial: Serial) -> bool {
++        self.serials.contains(&serial)
++    }
++
++    /// Whether `client` received agent input recently.
++    pub fn is_agent_driven(&self, client: &Client) -> bool {
++        self.clients
++            .get(&client.id())
++            .is_some_and(|t| t.elapsed() < AGENT_DRIVEN_TIMEOUT)
++    }
++
++    /// Called on every real keyboard focus change.
++    pub fn real_keyboard_focus_changed(&mut self, new: Option<ClientId>) {
++        let old = std::mem::replace(&mut self.real_keyboard_client, new.clone());
++        let agent_client = self
++            .keyboard
++            .as_ref()
++            .and_then(|(s, _)| s.client())
++            .map(|c| c.id());
++        if agent_client.is_some() && (agent_client == old || agent_client == new) {
++            self.keyboard_stale = true;
++        }
++    }
++
++    /// Remember a popup whose grab request carried an agent serial.
++    pub fn add_popup(&mut self, popup: PopupKind) {
++        self.popups.retain(|p| p.alive());
++        self.popups.push(popup);
++    }
++
++    fn is_popup(&self, surface: &WlSurface) -> bool {
++        self.popups.iter().any(|p| p.wl_surface() == surface)
++    }
++
++    /// Topmost live agent popup of the window with toplevel `root`.
++    fn top_popup(&self, root: &WlSurface) -> Option<WlSurface> {
++        self.popups
++            .iter()
++            .rev()
++            .filter(|p| p.alive())
++            .find(|p| find_popup_root_surface(p).ok().as_ref() == Some(root))
++            .map(|p| p.wl_surface().clone())
++    }
++
++    /// Take all agent popups of the window with toplevel `root`, topmost first.
++    fn take_popups(&mut self, root: &WlSurface) -> Vec<PopupKind> {
++        let (taken, kept): (Vec<_>, Vec<_>) = self.popups.drain(..).partition(|p| {
++            p.alive() && find_popup_root_surface(p).ok().as_ref() == Some(root)
++        });
++        self.popups = kept.into_iter().filter(|p| p.alive()).collect();
++        taken.into_iter().rev().collect()
++    }
++}
++
++const KEY_LEFTCTRL: u32 = 29;
++const KEY_LEFTSHIFT: u32 = 42;
++const KEY_U: u32 = 22;
++const KEY_SPACE: u32 = 57;
++
++fn now_ms() -> u32 {
++    get_monotonic_time().as_millis() as u32
++}
++
++fn same_client(surface: &WlSurface, client: &Client) -> bool {
++    surface.client().is_some_and(|c| c.id() == client.id())
++}
++
++impl State {
++    pub fn agent_input(&mut self, window_id: u64, events: Vec<AgentEvent>) -> Result<(), String> {
++        let (window, toplevel) = self
++            .niri
++            .layout
++            .windows()
++            .find(|(_, m)| m.id().get() == window_id)
++            .map(|(_, m)| (m.window.clone(), m.toplevel().wl_surface().clone()))
++            .ok_or_else(|| format!("no window with id {window_id}"))?;
++        let client = toplevel
++            .client()
++            .ok_or_else(|| String::from("window has no client"))?;
++
++        let pointer = self.niri.seat.get_pointer().unwrap();
++        let keyboard = self.niri.seat.get_keyboard().unwrap();
++        if pointer
++            .current_focus()
++            .is_some_and(|s| same_client(&s, &client))
++        {
++            return Err(String::from("target client holds the real pointer focus"));
++        }
++        if keyboard
++            .current_focus()
++            .is_some_and(|s| same_client(&s, &client))
++        {
++            return Err(String::from("target client holds the real keyboard focus"));
++        }
++
++        // Drop state that belongs to dead surfaces or another client.
++        let state = &mut self.niri.agent_input;
++        state.clients.retain(|_, t| t.elapsed() < AGENT_DRIVEN_TIMEOUT);
++        state.clients.insert(client.id(), Instant::now());
++        if state
++            .pointer
++            .as_ref()
++            .is_some_and(|s| !s.is_alive() || !same_client(s, &client))
++        {
++            state.pointer = None;
++        }
++        if state
++            .keyboard
++            .as_ref()
++            .is_some_and(|(s, _)| s.is_alive() && !same_client(s, &client))
++        {
++            state.keyboard = None;
++        }
++
++        // Another virtual keyboard (wtype, an IME forwarding keys, ...) may have left a different
++        // keymap on every client: smithay broadcasts keymap changes to all wl_keyboards. The agent
++        // sends seat keycodes, so make sure the target client interprets them with the seat keymap.
++        if events
++            .iter()
++            .any(|e| matches!(e, AgentEvent::Key { .. } | AgentEvent::Text { .. }))
++        {
++            self.agent_send_seat_keymap(&client);
++        }
++
++        let mut pointer_stale = self.niri.agent_input.pointer.is_some()
++            && self.niri.agent_input.pointer_real_enter != pointer.last_enter();
++
++        let geometry_loc = window.geometry().loc.to_f64();
++
++        for event in events {
++            match event {
++                AgentEvent::Motion { x, y } => {
++                    let point = Point::<f64, Logical>::from((x, y)) + geometry_loc;
++                    let (surface, loc) = window
++                        .surface_under(point, WindowSurfaceType::ALL)
++                        .ok_or_else(|| format!("no surface at ({x}, {y})"))?;
++                    let local = point - loc.to_f64();
++
++                    let entered = self.niri.agent_input.pointer.clone();
++                    let reenter = pointer_stale || entered.as_ref() != Some(&surface);
++                    pointer_stale = false;
++                    for ptr in pointer.client_pointers(&client) {
++                        if reenter {
++                            if let Some(old) = entered.as_ref().filter(|s| s.is_alive()) {
++                                ptr.leave(self.niri.agent_input.next_serial(), old);
++                            }
++                            ptr.enter(self.niri.agent_input.next_serial(), &surface, local.x, local.y);
++                        }
++                        ptr.motion(now_ms(), local.x, local.y);
++                        if ptr.version() >= 5 {
++                            ptr.frame();
++                        }
++                    }
++                    self.niri.agent_input.pointer = Some(surface);
++                    self.niri.agent_input.pointer_real_enter = pointer.last_enter();
++                }
++                AgentEvent::Button { button, pressed } => {
++                    if self.niri.agent_input.pointer.is_none() {
++                        return Err(String::from("Button before Motion"));
++                    }
++                    let on_popup = self
++                        .niri
++                        .agent_input
++                        .pointer
++                        .as_ref()
++                        .is_some_and(|s| self.niri.agent_input.is_popup(s));
++                    if pressed && !on_popup {
++                        for popup in self.niri.agent_input.take_popups(&toplevel) {
++                            let _ = PopupManager::dismiss_popup(&toplevel, &popup);
++                        }
++                    }
++
++                    let state = if pressed {
++                        ButtonState::Pressed
++                    } else {
++                        ButtonState::Released
++                    };
++                    for ptr in pointer.client_pointers(&client) {
++                        ptr.button(self.niri.agent_input.next_serial(), now_ms(), button, state);
++                        if ptr.version() >= 5 {
++                            ptr.frame();
++                        }
++                    }
++                }
++                AgentEvent::Axis {
++                    vertical,
++                    horizontal,
++                } => {
++                    if self.niri.agent_input.pointer.is_none() {
++                        return Err(String::from("Axis before Motion"));
++                    }
++                    for ptr in pointer.client_pointers(&client) {
++                        if vertical != 0. {
++                            ptr.axis(now_ms(), Axis::VerticalScroll, vertical);
++                        }
++                        if horizontal != 0. {
++                            ptr.axis(now_ms(), Axis::HorizontalScroll, horizontal);
++                        }
++                        if ptr.version() >= 5 {
++                            ptr.frame();
++                        }
++                    }
++                }
++                AgentEvent::PointerLeave => {
++                    if let Some(surface) = self.niri.agent_input.pointer.take() {
++                        for ptr in pointer.client_pointers(&client) {
++                            ptr.leave(self.niri.agent_input.next_serial(), &surface);
++                            if ptr.version() >= 5 {
++                                ptr.frame();
++                            }
++                        }
++                    }
++                }
++                AgentEvent::Key { keycode, pressed } => {
++                    self.agent_key(&client, &toplevel, keycode, pressed);
++                }
++                AgentEvent::Text {
++                    text,
++                    unicode_input,
++                } => {
++                    self.agent_text(&client, &toplevel, &text, unicode_input)?;
++                }
++                AgentEvent::KeyboardLeave => {
++                    if let Some((surface, _)) = self.niri.agent_input.keyboard.take() {
++                        for kbd in keyboard.client_keyboards(&client) {
++                            kbd.leave(self.niri.agent_input.next_serial(), &surface);
++                        }
++                    }
++                }
++            }
++        }
++
++        Ok(())
++    }
++
++    /// Enter the agent keyboard on the topmost agent popup of the window, or the toplevel, if it
++    /// is not there already (or real focus touched the client since).
++    fn agent_keyboard_enter(&mut self, client: &Client, toplevel: &WlSurface) {
++        let keyboard = self.niri.seat.get_keyboard().unwrap();
++        // Like a popup grab: keys go to the topmost agent popup if there is one.
++        let target = self
++            .niri
++            .agent_input
++            .top_popup(toplevel)
++            .unwrap_or_else(|| toplevel.clone());
++        let entered = self.niri.agent_input.keyboard.as_ref().map(|(s, _)| s.clone());
++        if !self.niri.agent_input.keyboard_stale && entered.as_ref() == Some(&target) {
++            return;
++        }
++        self.niri.agent_input.keyboard_stale = false;
++        for kbd in keyboard.client_keyboards(client) {
++            if let Some(old) = entered.as_ref().filter(|s| s.is_alive()) {
++                kbd.leave(self.niri.agent_input.next_serial(), old);
++            }
++            kbd.enter(self.niri.agent_input.next_serial(), &target, Vec::new());
++        }
++        let pressed_keys = self
++            .niri
++            .agent_input
++            .keyboard
++            .take()
++            .map(|(_, keys)| keys)
++            .unwrap_or_default();
++        self.niri.agent_input.keyboard = Some((target, pressed_keys.clone()));
++        self.agent_send_modifiers(client, &pressed_keys);
++    }
++
++    /// Press or release an evdev key for the agent keyboard.
++    fn agent_key(&mut self, client: &Client, toplevel: &WlSurface, keycode: u32, pressed: bool) {
++        self.agent_keyboard_enter(client, toplevel);
++        let keyboard = self.niri.seat.get_keyboard().unwrap();
++
++        let (_, pressed_keys) = self.niri.agent_input.keyboard.as_mut().unwrap();
++        if pressed {
++            if !pressed_keys.contains(&keycode) {
++                pressed_keys.push(keycode);
++            }
++        } else {
++            pressed_keys.retain(|k| *k != keycode);
++        }
++        let pressed_keys = pressed_keys.clone();
++
++        let state = if pressed {
++            KeyState::Pressed
++        } else {
++            KeyState::Released
++        };
++        for kbd in keyboard.client_keyboards(client) {
++            kbd.key(self.niri.agent_input.next_serial(), now_ms(), keycode, state);
++        }
++        self.agent_send_modifiers(client, &pressed_keys);
++    }
++
++    fn agent_tap(&mut self, client: &Client, toplevel: &WlSurface, keycode: u32, shift: bool) {
++        if shift {
++            self.agent_key(client, toplevel, KEY_LEFTSHIFT, true);
++        }
++        self.agent_key(client, toplevel, keycode, true);
++        self.agent_key(client, toplevel, keycode, false);
++        if shift {
++            self.agent_key(client, toplevel, KEY_LEFTSHIFT, false);
++        }
++    }
++
++    /// Find an evdev keycode and whether Shift is needed to type `ch` with the seat keymap.
++    fn agent_lookup_char(&mut self, ch: char) -> Option<(u32, bool)> {
++        let keysym = match ch {
++            '\n' | '\r' => xkb::Keysym::Return,
++            '\t' => xkb::Keysym::Tab,
++            '\u{8}' => xkb::Keysym::BackSpace,
++            _ => xkb::utf32_to_keysym(ch as u32),
++        };
++        if keysym == xkb::Keysym::NoSymbol {
++            return None;
++        }
++        let keyboard = self.niri.seat.get_keyboard().unwrap();
++        keyboard.with_xkb_state(self, |ctx| {
++            let xkb = ctx.xkb().lock().unwrap();
++            // SAFETY: the references do not outlive the lock.
++            let keymap = unsafe { xkb.keymap() };
++            let layout = unsafe { xkb.state() }.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE);
++            let shift_mask = 1 << keymap.mod_get_index(xkb::MOD_NAME_SHIFT);
++            let mut found = None;
++            keymap.key_for_each(|keymap, code| {
++                if found.is_some() || code.raw() < 8 {
++                    return;
++                }
++                for level in 0..keymap.num_levels_for_key(code, layout).min(2) {
++                    if !keymap.key_get_syms_by_level(code, layout, level).contains(&keysym) {
++                        continue;
++                    }
++                    // Check that the level is reached with no modifiers or with Shift alone.
++                    let mut masks = [0; 4];
++                    let n = keymap.key_get_mods_for_level(code, layout, level, &mut masks);
++                    let wanted = if level == 0 { 0 } else { shift_mask };
++                    if masks[..n].contains(&wanted) || (level == 0 && n == 0) {
++                        found = Some((code.raw() - 8, level == 1));
++                        return;
++                    }
++                }
++            });
++            found
++        })
++    }
++
++    /// Type text into the agent's target.
++    fn agent_text(
++        &mut self,
++        client: &Client,
++        toplevel: &WlSurface,
++        text: &str,
++        unicode_input: AgentUnicodeInput,
++    ) -> Result<(), String> {
++        let mut missing = String::new();
++        for ch in text.chars() {
++            if let Some((keycode, shift)) = self.agent_lookup_char(ch) {
++                self.agent_type_missing(client, toplevel, &missing, unicode_input)?;
++                missing.clear();
++                self.agent_tap(client, toplevel, keycode, shift);
++            } else {
++                missing.push(ch);
++            }
++        }
++        self.agent_type_missing(client, toplevel, &missing, unicode_input)
++    }
++
++    /// Type characters that the seat keymap lacks.
++    fn agent_type_missing(
++        &mut self,
++        client: &Client,
++        toplevel: &WlSurface,
++        text: &str,
++        unicode_input: AgentUnicodeInput,
++    ) -> Result<(), String> {
++        if text.is_empty() {
++            return Ok(());
++        }
++        match unicode_input {
++            AgentUnicodeInput::CtrlShiftU => {
++                for ch in text.chars() {
++                    self.agent_key(client, toplevel, KEY_LEFTCTRL, true);
++                    self.agent_key(client, toplevel, KEY_LEFTSHIFT, true);
++                    self.agent_tap(client, toplevel, KEY_U, false);
++                    self.agent_key(client, toplevel, KEY_LEFTSHIFT, false);
++                    self.agent_key(client, toplevel, KEY_LEFTCTRL, false);
++                    for digit in format!("{:x}", ch as u32).chars() {
++                        let (keycode, shift) = self
++                            .agent_lookup_char(digit)
++                            .ok_or_else(|| format!("seat keymap cannot type {digit:?}"))?;
++                        self.agent_tap(client, toplevel, keycode, shift);
++                    }
++                    self.agent_tap(client, toplevel, KEY_SPACE, false);
++                }
++                Ok(())
++            }
++            AgentUnicodeInput::Keymap => {
++                // A keymap with one key per distinct character, sent to this client only. The
++                // client's modifiers are reset while it is active; the seat keymap is restored
++                // right after, before any real input can reach the client.
++                let mut chars: Vec<char> = text.chars().collect();
++                chars.sort_unstable();
++                chars.dedup();
++                for chunk in chars.chunks(200) {
++                    let keymap_file = self.agent_temp_keymap(chunk)?;
++                    self.agent_keyboard_enter(client, toplevel);
++                    let keyboard = self.niri.seat.get_keyboard().unwrap();
++                    for kbd in keyboard.client_keyboards(client) {
++                        let res = keymap_file.with_fd(kbd.version() >= 7, |fd, size| {
++                            kbd.keymap(KeymapFormat::XkbV1, fd, size as u32)
++                        });
++                        if let Err(err) = res {
++                            warn!("error sending agent temporary keymap: {err:?}");
++                        }
++                        kbd.modifiers(self.niri.agent_input.next_serial(), 0, 0, 0, 0);
++                    }
++                    for ch in text.chars().filter(|c| chunk.contains(c)) {
++                        // Wire keycode = xkb keycode - 8; the temp keymap starts at xkb 9.
++                        let keycode = chunk.iter().position(|c| *c == ch).unwrap() as u32 + 1;
++                        for kbd in keyboard.client_keyboards(client) {
++                            let serial = self.niri.agent_input.next_serial();
++                            kbd.key(serial, now_ms(), keycode, KeyState::Pressed);
++                            let serial = self.niri.agent_input.next_serial();
++                            kbd.key(serial, now_ms(), keycode, KeyState::Released);
++                        }
++                    }
++                    self.agent_send_seat_keymap(client);
++                    let pressed = self
++                        .niri
++                        .agent_input
++                        .keyboard
++                        .as_ref()
++                        .map(|(_, k)| k.clone())
++                        .unwrap_or_default();
++                    self.agent_send_modifiers(client, &pressed);
++                }
++                Ok(())
++            }
++        }
++    }
++
++    fn agent_temp_keymap(&mut self, chars: &[char]) -> Result<KeymapFile, String> {
++        let mut keycodes = String::new();
++        let mut symbols = String::new();
++        for (i, ch) in chars.iter().enumerate() {
++            keycodes.push_str(&format!("<K{i}> = {};\n", i + 9));
++            symbols.push_str(&format!("key <K{i}> {{ [ U{:04X} ] }};\n", *ch as u32));
++        }
++        let text = format!(
++            "xkb_keymap {{\n\
++             xkb_keycodes \"agent\" {{ minimum = 8; maximum = {}; {keycodes} }};\n\
++             xkb_types \"agent\" {{ include \"complete\" }};\n\
++             xkb_compatibility \"agent\" {{ include \"complete\" }};\n\
++             xkb_symbols \"agent\" {{ {symbols} }};\n\
++             }};\n",
++            chars.len() + 9
++        );
++        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
++        let keymap = xkb::Keymap::new_from_string(
++            &context,
++            text,
++            xkb::KEYMAP_FORMAT_TEXT_V1,
++            xkb::KEYMAP_COMPILE_NO_FLAGS,
++        )
++        .ok_or_else(|| String::from("error compiling temporary agent keymap"))?;
++        Ok(KeymapFile::new(&keymap))
++    }
++
++    /// Render a window and write it as PNG from a worker thread, without the clipboard and
++    /// notification side effects of the regular screenshot action. `done` receives the result.
++    pub fn agent_screenshot(
++        &mut self,
++        window_id: u64,
++        path: String,
++        show_pointer: bool,
++        done: async_channel::Sender<Result<AgentScreenshotInfo, String>>,
++    ) -> Result<(), String> {
++        let niri = &self.niri;
++        let (output, mapped) = niri
++            .layout
++            .windows()
++            .find(|(_, m)| m.id().get() == window_id)
++            .and_then(|(mon, m)| Some((mon?.output().clone(), m)))
++            .ok_or_else(|| format!("no window with id {window_id} on an output"))?;
++
++        let (size, (scale, geometry), pixels) = self
++            .backend
++            .with_primary_renderer(|renderer| {
++                niri.render_window_pixels(renderer, &output, mapped, show_pointer)
++            })
++            .ok_or_else(|| String::from("no renderer"))?
++            .map_err(|err| format!("error rendering window: {err:?}"))?;
++
++        std::thread::spawn(move || {
++            let result = (|| {
++                let mut buf = Vec::new();
++                crate::utils::write_png_rgba8(
++                    std::io::Cursor::new(&mut buf),
++                    size.w as u32,
++                    size.h as u32,
++                    &pixels,
++                )
++                .map_err(|err| format!("error encoding PNG: {err:?}"))?;
++                std::fs::write(&path, buf)
++                    .map_err(|err| format!("error writing {path}: {err}"))?;
++                Ok(AgentScreenshotInfo {
++                    width: size.w as u32,
++                    height: size.h as u32,
++                    scale,
++                    geometry_x: geometry.x,
++                    geometry_y: geometry.y,
++                })
++            })();
++            let _ = done.send_blocking(result);
++        });
++        Ok(())
++    }
++
++    fn agent_send_seat_keymap(&mut self, client: &Client) {
++        let keyboard = self.niri.seat.get_keyboard().unwrap();
++        let keymap_file = keyboard.with_xkb_state(self, |ctx| {
++            let xkb = ctx.xkb().lock().unwrap();
++            // SAFETY: KeymapFile only serializes the keymap; no ref-count is kept.
++            KeymapFile::new(unsafe { xkb.keymap() })
++        });
++        for kbd in keyboard.client_keyboards(client) {
++            let res = keymap_file.with_fd(kbd.version() >= 7, |fd, size| {
++                kbd.keymap(KeymapFormat::XkbV1, fd, size as u32)
++            });
++            if let Err(err) = res {
++                warn!("error sending agent keymap: {err:?}");
++            }
++        }
++    }
++
++    /// Send modifiers derived from the agent's own pressed keys (not the user's).
++    fn agent_send_modifiers(&mut self, client: &Client, pressed: &[u32]) {
++        let keyboard = self.niri.seat.get_keyboard().unwrap();
++        let (depressed, latched, locked, group) = keyboard.with_xkb_state(self, |ctx| {
++            let xkb = ctx.xkb().lock().unwrap();
++            // SAFETY: the temporary state is dropped before the lock is released.
++            let keymap = unsafe { xkb.keymap() };
++            let mut state = xkb::State::new(keymap);
++            for key in pressed {
++                state.update_key(Keycode::new(key + 8), xkb::KeyDirection::Down);
++            }
++            (
++                state.serialize_mods(xkb::STATE_MODS_DEPRESSED),
++                state.serialize_mods(xkb::STATE_MODS_LATCHED),
++                state.serialize_mods(xkb::STATE_MODS_LOCKED),
++                state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE),
++            )
++        });
++        for kbd in keyboard.client_keyboards(client) {
++            kbd.modifiers(
++                self.niri.agent_input.next_serial(),
++                depressed,
++                latched,
++                locked,
++                group,
++            );
++        }
++    }
++}
+diff --git a/src/handlers/compositor.rs b/src/handlers/compositor.rs
+index f38b293..b27cf72 100644
+--- a/src/handlers/compositor.rs
++++ b/src/handlers/compositor.rs
+@@ -163,6 +163,12 @@ impl CompositorHandler for State {
+                         // requesting activation and mapping.
+                         let token = activation_token_data.filter(|token| {
+                             token.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT
++                                // Urgency-only tokens (e.g. downgraded agent tokens) must not
++                                // focus the new window.
++                                && token
++                                    .user_data
++                                    .get::<crate::handlers::UrgentOnlyMarker>()
++                                    .is_none()
+                         });
+                         if token.is_some() {
+                             ActivateWindow::Yes
+@@ -176,6 +182,26 @@ impl CompositorHandler for State {
+                         }
+                     });
+ 
++                    // New windows of a client driven by agent input don't take the user's focus,
++                    // unless the user is working in that client.
++                    let activate = match surface.client() {
++                        Some(client)
++                            if self.niri.agent_input.is_agent_driven(&client)
++                                && !self
++                                    .niri
++                                    .seat
++                                    .get_keyboard()
++                                    .unwrap()
++                                    .current_focus()
++                                    .and_then(|f| f.client())
++                                    .is_some_and(|c| c.id() == client.id()) =>
++                        {
++                            debug!("not activating new window of an agent-driven client");
++                            ActivateWindow::No
++                        }
++                        _ => activate,
++                    };
++
+                     let parent = toplevel
+                         .parent()
+                         .and_then(|parent| self.niri.layout.find_window_and_output(&parent))
+diff --git a/src/handlers/mod.rs b/src/handlers/mod.rs
+index 3532078..050ea59 100644
+--- a/src/handlers/mod.rs
++++ b/src/handlers/mod.rs
+@@ -121,6 +121,9 @@ impl SeatHandler for State {
+     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+         let dh = &self.niri.display_handle;
+         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
++        self.niri
++            .agent_input
++            .real_keyboard_focus_changed(client.as_ref().map(|c| c.id()));
+         set_data_device_focus(dh, seat, client.clone());
+         set_primary_focus(dh, seat, client);
+     }
+@@ -768,7 +771,7 @@ impl GammaControlHandler for State {
+ }
+ delegate_gamma_control!(State);
+ 
+-struct UrgentOnlyMarker;
++pub(crate) struct UrgentOnlyMarker;
+ 
+ impl XdgActivationHandler for State {
+     fn activation_state(&mut self) -> &mut XdgActivationState {
+@@ -788,6 +791,13 @@ impl XdgActivationHandler for State {
+             return false;
+         };
+ 
++        // A serial from agent input: allow at most urgency, never a focus change.
++        if self.niri.agent_input.issued(serial) {
++            debug!("downgrading xdg-activation token with an agent input serial to urgency");
++            data.user_data.insert_if_missing(|| UrgentOnlyMarker);
++            return true;
++        }
++
+         // Widely-used clients such as Discord and Telegram make new tokens (with invalid serials)
+         // upon clicking on their tray icon or on their notification. This debug flag makes that
+         // work.
+diff --git a/src/handlers/xdg_shell.rs b/src/handlers/xdg_shell.rs
+index 38440c9..a831617 100644
+--- a/src/handlers/xdg_shell.rs
++++ b/src/handlers/xdg_shell.rs
+@@ -273,6 +273,15 @@ impl XdgShellHandler for State {
+             return;
+         };
+ 
++        // A popup opened by agent input (menu, select dropdown, ...). Keep it mapped but don't
++        // take a seat grab, which would steal the user's pointer and keyboard. Agent input
++        // routes keys to it and dismisses it on clicks elsewhere.
++        if self.niri.agent_input.issued(serial) && !self.niri.is_locked() {
++            trace!("mapping agent popup without a seat grab");
++            self.niri.agent_input.add_popup(popup);
++            return;
++        }
++
+         // We need to hand out the grab in a way consistent with what update_keyboard_focus()
+         // thinks the current focus is, otherwise it will desync and cause weird issues with
+         // keyboard focus being at the wrong place.
+diff --git a/src/ipc/server.rs b/src/ipc/server.rs
+index db71da6..dca8ffe 100644
+--- a/src/ipc/server.rs
++++ b/src/ipc/server.rs
+@@ -455,6 +455,35 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
+             let casts = state.casts.casts.values().cloned().collect();
+             Response::Casts(casts)
+         }
++        Request::AgentInput { window_id, events } => {
++            let (tx, rx) = async_channel::bounded(1);
++            ctx.event_loop.insert_idle(move |state| {
++                let result = state.agent_input(window_id, events);
++                let _ = tx.send_blocking(result);
++            });
++            let result = rx.recv().await;
++            result.map_err(|_| String::from("error delivering agent input"))??;
++            Response::Handled
++        }
++        Request::AgentScreenshot {
++            window_id,
++            path,
++            show_pointer,
++        } => {
++            if !Path::new(&path).is_absolute() {
++                return Err(format!("path must be absolute: {path}"));
++            }
++            let (tx, rx) = async_channel::bounded(1);
++            ctx.event_loop.insert_idle(move |state| {
++                let result = state.agent_screenshot(window_id, path, show_pointer, tx.clone());
++                if let Err(err) = result {
++                    let _ = tx.send_blocking(Err(err));
++                }
++            });
++            let result = rx.recv().await;
++            let info = result.map_err(|_| String::from("error taking agent screenshot"))??;
++            Response::AgentScreenshot(info)
++        }
+     };
+ 
+     Ok(response)
+diff --git a/src/lib.rs b/src/lib.rs
+index d516838..dec17d5 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -3,6 +3,7 @@ extern crate tracing;
+ 
+ #[cfg(feature = "dbus")]
+ pub mod a11y;
++pub mod agent_input;
+ pub mod animation;
+ pub mod backend;
+ pub mod cli;
+diff --git a/src/niri.rs b/src/niri.rs
+index ec40e01..aa95296 100644
+--- a/src/niri.rs
++++ b/src/niri.rs
+@@ -393,6 +393,7 @@ pub struct Niri {
+     pub pending_mru_commit: Option<PendingMruCommit>,
+ 
+     pub pick_window: Option<async_channel::Sender<Option<MappedId>>>,
++    pub agent_input: crate::agent_input::AgentInputState,
+     pub pick_color: Option<async_channel::Sender<Option<niri_ipc::PickedColor>>>,
+ 
+     pub debug_draw_opaque_regions: bool,
+@@ -2604,6 +2605,7 @@ impl Niri {
+             pending_mru_commit: None,
+ 
+             pick_window: None,
++            agent_input: Default::default(),
+             pick_color: None,
+ 
+             debug_draw_opaque_regions: false,
+@@ -5581,6 +5583,21 @@ impl Niri {
+         show_pointer: bool,
+         path: Option<String>,
+     ) -> anyhow::Result<()> {
++        let (size, _, pixels) =
++            self.render_window_pixels(renderer, output, mapped, show_pointer)?;
++        self.save_screenshot(size, pixels, write_to_disk, path)
++            .context("error saving screenshot")
++    }
++
++    /// Renders a window into RGBA8 pixels without any side effects. Also returns the scale and
++    /// the window geometry origin inside the image (physical pixels).
++    pub fn render_window_pixels(
++        &self,
++        renderer: &mut GlesRenderer,
++        output: &Output,
++        mapped: &Mapped,
++        show_pointer: bool,
++    ) -> anyhow::Result<(Size<i32, Physical>, (f64, Point<i32, Physical>), Vec<u8>)> {
+         let _span = tracy_client::span!("Niri::screenshot_window");
+ 
+         let scale = Scale::from(output.current_scale().fractional_scale());
+@@ -5636,8 +5653,10 @@ impl Niri {
+             elements,
+         )?;
+ 
+-        self.save_screenshot(geo.size, pixels, write_to_disk, path)
+-            .context("error saving screenshot")
++        // mapped.render() above puts the window geometry origin at geometry().loc.
++        let geometry_origin =
++            mapped.window.geometry().loc.to_physical_precise_round(scale) - geo.loc;
++        Ok((geo.size, (scale.x, geometry_origin), pixels))
+     }
+ 
+     pub fn save_screenshot(

@@ -6,6 +6,7 @@
 
 - 基于 [`ilysenko/codex-desktop-linux`](https://github.com/ilysenko/codex-desktop-linux) 的补丁版 Codex Desktop（Rust 后端 `codex-computer-use-linux` + JS 适配层）；
 - 让 niri IPC 报告平铺窗口位置的 niri 补丁；
+- **agent 输入补丁**（默认开启）：niri 新增 `AgentInput` / `AgentScreenshot` IPC，Computer Use 直接向目标窗口的客户端投递输入、离屏渲染截图——**不移动你的鼠标、不抢键盘焦点、不切换活动窗口，截图不弹通知、不覆盖剪贴板**；
 - 一个 NixOS 模块，一次性配置好 ydotool、`/dev/uinput`、AT-SPI、dconf 与 niri；
 - `codex-computer-use` 包装脚本，`codex-computer-use mcp` 即为 stdio MCP 服务器。
 
@@ -57,7 +58,7 @@ niri-computer-use/
 │   └── codex-desktop.nix     # 补丁源码、Rust 后端、Desktop 覆盖、包装脚本
 ├── modules/
 │   └── nixos.nix             # programs.codexComputerUse 模块
-├── patches/                  # 6 个上游补丁 + 1 个 niri 补丁
+├── patches/                  # 7 个后端补丁 + 2 个 niri 补丁
 └── docs/
 ```
 
@@ -75,6 +76,7 @@ niri-computer-use/
 - [docs/architecture.md](docs/architecture.md) — 组件与数据流
 - [docs/nixos-module.md](docs/nixos-module.md) — 模块选项与它实际做了什么
 - [docs/patches.md](docs/patches.md) — 每个补丁解决的问题与设计取舍
+- [docs/agent-input.md](docs/agent-input.md) — 不抢焦点的 agent 输入：原理、协议、限制
 - [docs/mcp.md](docs/mcp.md) — 作为 MCP 服务器接入 Claude Code
 - [docs/maintenance.md](docs/maintenance.md) — 升级上游、排障
 - [docs/validation.md](docs/validation.md) — 实机验证记录
@@ -89,4 +91,4 @@ niri-computer-use/
 
 [MIT](LICENSE)。
 
-例外：`patches/niri-ipc-tiled-window-position.patch` 是对 [niri](https://github.com/YaLTeR/niri) 的修改，遵循 niri 的 GPL-3.0-or-later 许可证。`codex-*` 补丁修改的上游 [codex-desktop-linux](https://github.com/ilysenko/codex-desktop-linux) 同为 MIT。Codex Desktop 本身是 OpenAI 的非自由软件，不包含在本仓库中。
+例外：`patches/niri-ipc-tiled-window-position.patch` 与 `patches/niri-agent-input.patch` 是对 [niri](https://github.com/YaLTeR/niri) 的修改，遵循 niri 的 GPL-3.0-or-later 许可证。`codex-*` 补丁修改的上游 [codex-desktop-linux](https://github.com/ilysenko/codex-desktop-linux) 同为 MIT。Codex Desktop 本身是 OpenAI 的非自由软件，不包含在本仓库中。

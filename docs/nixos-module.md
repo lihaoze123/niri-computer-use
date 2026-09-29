@@ -10,6 +10,7 @@
 | `package` | package | `computer-use.packages.${system}.codex-desktop` | 传给 `programs.codexDesktopLinux.package` 的 Desktop 包 |
 | `users` | list of str | `[ ]` | 加入 `ydotool` 组的用户（可访问 ydotool socket 与 `/dev/uinput`） |
 | `patchNiri` | bool | `true` | 用补丁覆盖 `programs.niri.package` |
+| `agentInput` | bool | `true` | 同时给 niri 打 agent 输入补丁（需 `patchNiri`），见 [agent-input.md](agent-input.md) |
 | `mcpWrapper.enable` | bool | `true` | 安装 `codex-computer-use` 到 `environment.systemPackages` |
 
 ## 启用后实际设置的内容
@@ -36,7 +37,9 @@ users.users.<name>.extraGroups = [ "ydotool" ]; # 对 cfg.users 中每个用户
 
 # patchNiri = true
 programs.niri.package = pkgs.niri.overrideAttrs (old: {
-  patches = (old.patches or [ ]) ++ [ ./patches/niri-ipc-tiled-window-position.patch ];
+  patches = (old.patches or [ ])
+    ++ [ ./patches/niri-ipc-tiled-window-position.patch ]
+    ++ lib.optional cfg.agentInput ./patches/niri-agent-input.patch;
 });
 
 # mcpWrapper.enable = true

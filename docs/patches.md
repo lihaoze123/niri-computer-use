@@ -13,10 +13,12 @@
 | 3 | `codex-linux-native-drag.patch` | `src/server.rs`, `native-protocol.mjs`, `native-client.mjs` | 后端 + JS |
 | 4 | `codex-linux-drag-interpolation.patch` | `src/abs_pointer.rs` | 后端 |
 | 5 | `codex-niri-scroll-unicode.patch` | `src/server.rs` | 后端 |
-| 6 | `codex-linux-native-launch.patch` | `native-client.mjs`, `native-protocol.mjs`, `native-backend-service.mjs` | 仅 JS |
+| 6 | `codex-niri-agent-input.patch` | `src/niri_agent.rs`（新）, `src/server.rs`, `src/screenshot.rs` | 后端 |
+| 7 | `codex-linux-native-launch.patch` | `native-client.mjs`, `native-protocol.mjs`, `native-backend-service.mjs` | 仅 JS |
 | — | `niri-ipc-tiled-window-position.patch` | niri `src/layout/scrolling.rs` | niri |
+| — | `niri-agent-input.patch` | niri `src/agent_input.rs`（新）, IPC, `handlers/` | niri（`agentInput`） |
 
-1–5 构成 `backendSource`，Rust 后端由它构建；6 在其之上生成 `patchedSource`，只从中取 `.mjs` 文件。
+1–6 构成 `backendSource`，Rust 后端由它构建；7 在其之上生成 `patchedSource`，只从中取 `.mjs` 文件。
 
 ## 1. 窗口截图 — `codex-niri-window-screenshot.patch`
 
@@ -66,6 +68,16 @@ GTK 应用需要在按键按下**之后**收到移动事件才会进入拖拽状
   - 滚动距离从像素换算成页（`pixels / 500`，至少 1）；
   - 社区清单成功后，移除内置原生清单失败带来的 `Native apps:` 错误。
 - 旧的字符串 app id 仍然可用。
+
+## 6. agent 输入 — `codex-niri-agent-input.patch` + `niri-agent-input.patch`
+
+详见 [agent-input.md](agent-input.md)。后端在运行时探测 niri 是否支持 `AgentInput`（发送一个 `window_id: 0` 的请求，补丁版回答 "no window with id 0"），支持时：
+
+- 带窗口目标的 `click` / `scroll` / `drag` / `press_key` / `type_text` 走 `AgentInput`，**不调用** `focus_target_for_input`（它会激活窗口）；
+- niri 窗口截图走 `AgentScreenshot`，`screenshot` 不再抬起窗口；
+- 截图坐标按 `AgentScreenshot` 返回的缩放与几何偏移换算成窗口内逻辑坐标（顺带修正了 CSD 阴影导致的 16–22px 偏移）。
+
+其余情况（元素索引点击、未知按键名、无窗口目标、未打补丁的 niri、`CODEX_COMPUTER_USE_NIRI_AGENT=0`）沿用补丁 1–5 的原路径。
 
 ## 回到上游
 

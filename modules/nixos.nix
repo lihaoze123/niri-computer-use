@@ -39,6 +39,19 @@ in
       '';
     };
 
+    agentInput = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Also patch niri with the AgentInput/AgentScreenshot IPC requests (requires
+        `patchNiri`). Computer Use then delivers input to the target window's client
+        without moving the user's pointer, keyboard focus or active window, keeps menus
+        opened by the agent without a seat grab, does not focus windows the agent opens,
+        and takes window screenshots without notifications or clipboard changes. The
+        backend detects the IPC at runtime and falls back to uinput/ydotool without it.
+      '';
+    };
+
     mcpWrapper.enable = mkOption {
       type = types.bool;
       default = true;
@@ -78,7 +91,9 @@ in
 
     (mkIf cfg.patchNiri {
       programs.niri.package = pkgs.niri.overrideAttrs (old: {
-        patches = (old.patches or [ ]) ++ [ ../patches/niri-ipc-tiled-window-position.patch ];
+        patches = (old.patches or [ ])
+          ++ [ ../patches/niri-ipc-tiled-window-position.patch ]
+          ++ lib.optional cfg.agentInput ../patches/niri-agent-input.patch;
       });
     })
 

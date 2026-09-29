@@ -35,5 +35,14 @@
 ## 2026-09-29
 
 - 后端通过 `codex-computer-use mcp` 以 stdio MCP 形式接入 Claude Code（`linux-cua`）。
+- 在嵌套 niri（winit 后端）中验证 agent 输入原型（`niri-agent-input.patch`），用 `wtype`/`wlrctl` 模拟用户、IPC 或 MCP 驱动 agent：
+  - 两个 kitty 同时各输入 15 行：内容无串扰，真实焦点始终在"用户"窗口；期间 agent 窗口收到 46 次由 `wtype` 触发的 keymap 切换，agent 仍全部正确（每次按键前补发 seat keymap）。
+  - GTK4（zenity）：未激活窗口中点击输入框、输入、点击确定，输出 `gtk agent ok`；前后截图光标位置一致。
+  - Edge 148（独立 profile）：点击 textarea 并输入，页面事件为 mousedown/focus/keydown×N，无 blur。首次测试发现 Chromium 用 agent 点击的 serial 申请 xdg-activation 抢走焦点，改为降级为 urgent 后通过。
+  - `<select>` 下拉（xdg_popup）：保持打开、键盘 ↓↓Enter 选中、直接点击选项、点击外部关闭均通过；`window.open` 新窗口不获得焦点。
+  - 真实指针经过 agent 窗口后，agent 状态失效导致点击无效；改为检测真实焦点变化后重新 enter，复测通过。
+  - `AgentScreenshot`：D-Bus 上无 `Notify` 调用，剪贴板保持不变。
+  - `Text`：kitty 中 ASCII、中文、emoji 经临时 per-client keymap 完整输入；Edge 中中文/emoji 经 Ctrl+Shift+U 输入，无崩溃。
+  - 补丁版后端经 stdio MCP：`screenshot`（来源 `niri-agent-window`）、相对坐标 `click`、`type_text`、`press_key` 均不改变真实焦点，无通知。
 - 整理为独立 flake 后，`codex-desktop` 的输出路径与原配置中的构建完全一致
   （`/nix/store/ri5b24d20g0f9b8l25m0nzgpprvllhjz-codex-desktop-computer-use-linux-26.917.61114`）。

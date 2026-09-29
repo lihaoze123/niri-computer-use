@@ -29,6 +29,9 @@ let
     ../patches/codex-linux-native-drag.patch
     ../patches/codex-linux-drag-interpolation.patch
     ../patches/codex-niri-scroll-unicode.patch
+    # Uses niri's AgentInput/AgentScreenshot IPC when available (see niri-agent-input.patch);
+    # falls back to the patches above otherwise.
+    ../patches/codex-niri-agent-input.patch
   ];
 
   backendSource = pkgs.applyPatches {

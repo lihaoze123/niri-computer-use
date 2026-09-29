@@ -25,10 +25,24 @@ Rust 后端依赖的系统能力：
             或 Chromium 的 Ctrl+Shift+U 码点输入
 ```
 
+## agent 输入路径（`agentInput = true`）
+
+```
+Computer Use 工具调用（带 window_id 等目标）
+  └─ niri_agent::supported()?  ── 否 ──> 原路径（激活窗口 + uinput/ydotool）
+        │ 是
+        ├─ 截图：AgentScreenshot{window_id,path} → PNG + {scale, geometry_x/y}
+        └─ 输入：AgentInput{window_id, events:[Motion|Button|Axis|Key|Text…]}
+               niri 直接写目标客户端的 wl_pointer / wl_keyboard，
+               seat 焦点、光标、窗口激活均不变
+```
+
+原理与限制见 [agent-input.md](agent-input.md)。
+
 ## 构建流程（`packages/codex-desktop.nix`）
 
 1. 用 `codex-desktop-linux` 自己锁定的 nixpkgs 实例化 `pkgs`（允许 unfree），保证与上游 Desktop 包二进制兼容。
-2. `backendSource` = 上游源码 + 5 个后端补丁（截图、坐标、拖拽、拖拽插值、滚动/Unicode）。
+2. `backendSource` = 上游源码 + 6 个后端补丁（截图、坐标、拖拽、拖拽插值、滚动/Unicode、agent 输入）。
 3. `patchedSource` = `backendSource` + `codex-linux-native-launch.patch`（只改 `.mjs`）。
 4. `backend` = 从 `backendSource` 构建 `codex-computer-use-linux`，`doCheck = true` 运行完整 Rust 测试；`COMPUTER_USE_WTYPE_EXECUTABLE` 在编译期固定 `wtype` 路径。crates 下载改走 `static.crates.io`。
 5. `desktop` = 上游 `codex-desktop-computer-use-ui` 的 `overrideAttrs`，在 `postInstall` 中替换插件的后端二进制和 4 个 `.mjs` 文件。`passthru.niriBackend` 指向 `backend`。
