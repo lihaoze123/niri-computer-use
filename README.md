@@ -1,4 +1,4 @@
-# computer-use
+# niri-computer-use
 
 在 **NixOS + niri (Wayland)** 上运行 Codex Desktop 的 Linux Computer Use，并把同一个后端以 stdio MCP 的形式提供给 Claude Code 等客户端。
 
@@ -19,8 +19,8 @@
 
 ```nix
 {
-  inputs.computer-use.url = "github:<owner>/computer-use";
-  # 本地克隆也可以："git+file:///path/to/computer-use"
+  inputs.computer-use.url = "github:lihaoze123/niri-computer-use";
+  # 本地克隆也可以："git+file:///path/to/niri-computer-use"
 
   outputs = { nixpkgs, computer-use, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
@@ -50,7 +50,7 @@ claude mcp add --scope user linux-cua -- codex-computer-use mcp
 ## 仓库结构
 
 ```
-computer-use/
+niri-computer-use/
 ├── flake.nix                 # 输出 packages / nixosModules / formatter
 ├── flake.lock                # codex-desktop-linux 固定在补丁对应的版本
 ├── packages/

@@ -28,7 +28,7 @@ claude mcp add --scope user linux-cua -- codex-computer-use mcp
 不使用 NixOS 模块时，也可以直接运行：
 
 ```bash
-nix run github:<owner>/computer-use#codex-computer-use -- mcp
+nix run github:lihaoze123/niri-computer-use#codex-computer-use -- mcp
 ```
 
 但此时 ydotool、uinput 权限、AT-SPI 等系统前提需自行准备。
