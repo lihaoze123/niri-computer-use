@@ -84,3 +84,9 @@ niri-computer-use/
 - 仅支持 `x86_64-linux`，主要针对 niri；其他合成器走上游原有路径。
 - niri 窗口截图命令会顺带把 PNG 放进剪贴板。
 - 上游插件版本号未变，重建后可能需要结束旧的插件进程/缓存。
+
+## 许可证
+
+[MIT](LICENSE)。
+
+例外：`patches/niri-ipc-tiled-window-position.patch` 是对 [niri](https://github.com/YaLTeR/niri) 的修改，遵循 niri 的 GPL-3.0-or-later 许可证。`codex-*` 补丁修改的上游 [codex-desktop-linux](https://github.com/ilysenko/codex-desktop-linux) 同为 MIT。Codex Desktop 本身是 OpenAI 的非自由软件，不包含在本仓库中。
