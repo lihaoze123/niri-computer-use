@@ -40,10 +40,10 @@ index f2bc2ad..3c5f943 100644
      #[knuffel(property)]
      pub at_startup: Option<bool>,
 diff --git a/niri-ipc/src/lib.rs b/niri-ipc/src/lib.rs
-index 0aa3cb4..a3b4682 100644
+index 0aa3cb4..d04140c 100644
 --- a/niri-ipc/src/lib.rs
 +++ b/niri-ipc/src/lib.rs
-@@ -119,6 +119,106 @@ pub enum Request {
+@@ -119,6 +119,122 @@ pub enum Request {
      OverviewState,
      /// Request information about screencasts.
      Casts,
@@ -147,10 +147,26 @@ index 0aa3cb4..a3b4682 100644
 +    PointerLeave,
 +    /// Send keyboard leave to the surface the agent keyboard is on.
 +    KeyboardLeave,
++}
++
++/// What a computer-use agent did, for [`Event::AgentInputActivity`].
++#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
++#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
++pub enum AgentActivityKind {
++    /// Moved the agent pointer (or sent pointer leave).
++    Pointer,
++    /// Pressed or released a pointer button.
++    Click,
++    /// Scrolled.
++    Scroll,
++    /// Pressed keys or typed text.
++    Keyboard,
++    /// Took a screenshot of the window.
++    Screenshot,
  }
  
  /// Reply from niri to client.
-@@ -137,6 +237,8 @@ pub type Reply = Result<Response, String>;
+@@ -137,6 +253,8 @@ pub type Reply = Result<Response, String>;
  pub enum Response {
      /// A request that does not need a response was handled successfully.
      Handled,
@@ -159,12 +175,30 @@ index 0aa3cb4..a3b4682 100644
      /// The version string for the running niri instance.
      Version(String),
      /// Information about connected outputs.
+@@ -1705,6 +1823,17 @@ pub enum Event {
+         /// Stream ID of the stopped screencast.
+         stream_id: u64,
+     },
++    /// A computer-use agent sent input to a window or took its screenshot.
++    ///
++    /// Sent once per [`Request::AgentInput`] or [`Request::AgentScreenshot`]. For a request
++    /// with several kinds of events, `kind` is the most significant one (keyboard, then click,
++    /// then scroll, then pointer).
++    AgentInputActivity {
++        /// Id of the window.
++        window_id: u64,
++        /// What the agent did.
++        kind: AgentActivityKind,
++    },
+ }
+ 
+ impl From<Duration> for Timestamp {
 diff --git a/src/agent_input.rs b/src/agent_input.rs
 new file mode 100644
-index 0000000..967266d
+index 0000000..28b0071
 --- /dev/null
 +++ b/src/agent_input.rs
-@@ -0,0 +1,1061 @@
+@@ -0,0 +1,1214 @@
 +//! Per-client "virtual focus" input for computer-use agents.
 +//!
 +//! Wayland input objects are per client: every client has its own `wl_pointer` and `wl_keyboard`
@@ -174,9 +208,11 @@ index 0000000..967266d
 +//! nothing, so the user's pointer and focus stay where they are.
 +//!
 +//! Protocol events carry no surface after `enter`, so a client cannot distinguish two focus
-+//! streams. Input is therefore refused while the target client holds the real seat focus.
++//! streams. Input is therefore refused while the target client holds the real keyboard focus (or
++//! a real pointer grab). A real pointer merely hovering the client is held back instead: it
++//! leaves the client's surfaces while the agent pointer drives it, and re-enters afterwards.
 +
-+use niri_ipc::{AgentEvent, AgentScreenshotInfo, AgentUnicodeInput};
++use niri_ipc::{AgentActivityKind, AgentEvent, AgentScreenshotInfo, AgentUnicodeInput};
 +use smithay::desktop::{find_popup_root_surface, PopupKind, PopupManager, WindowSurfaceType};
 +use smithay::input::keyboard::{xkb, KeymapFile, Keycode};
 +use smithay::reexports::wayland_server::protocol::wl_keyboard::{KeyState, KeymapFormat};
@@ -227,6 +263,11 @@ index 0000000..967266d
 +    /// Windows (by id) that recently received agent input or screenshots, and when. They match
 +    /// the `is-agent-driven` window rule.
 +    windows: HashMap<u64, Instant>,
++    /// Client whose real pointer input is held back while the agent pointer drives it, and
++    /// until when. The real pointer does not focus its surfaces meanwhile.
++    pointer_hold: Option<(ClientId, Instant)>,
++    /// Pointer buttons the agent holds.
++    buttons: Vec<u32>,
 +    /// Agent pointer indicators by window id, shown while the window is agent-driven.
 +    cursors: HashMap<u64, AgentCursor>,
 +    expiry_running: bool,
@@ -246,6 +287,10 @@ index 0000000..967266d
 +
 +/// A client counts as agent-driven for this long after its last agent input.
 +const AGENT_DRIVEN_TIMEOUT: Duration = Duration::from_secs(30);
++
++/// The real pointer is held back from the agent's client for this long after agent pointer
++/// input (or as long as the agent holds a button, up to `AGENT_DRIVEN_TIMEOUT`).
++const AGENT_POINTER_HOLD: Duration = Duration::from_millis(600);
 +
 +/// Frame callbacks are paced for windows touched by the agent for this long.
 +const AGENT_PUMP_DURATION: Duration = Duration::from_secs(2);
@@ -442,6 +487,13 @@ index 0000000..967266d
 +        self.serials.contains(&serial)
 +    }
 +
++    /// Whether the real pointer must not focus surfaces of `client` right now.
++    pub fn holds_pointer(&self, client: &ClientId) -> bool {
++        self.pointer_hold
++            .as_ref()
++            .is_some_and(|(c, until)| c == client && *until > Instant::now())
++    }
++
 +    /// Whether `client` received agent input recently.
 +    pub fn is_agent_driven(&self, client: &Client) -> bool {
 +        self.clients
@@ -501,6 +553,26 @@ index 0000000..967266d
 +    get_monotonic_time().as_millis() as u32
 +}
 +
++/// The most significant kind of activity in an agent input request.
++fn activity_kind(events: &[AgentEvent]) -> Option<AgentActivityKind> {
++    events
++        .iter()
++        .map(|e| match e {
++            AgentEvent::Key { .. } | AgentEvent::Text { .. } | AgentEvent::KeyboardLeave => {
++                AgentActivityKind::Keyboard
++            }
++            AgentEvent::Button { .. } => AgentActivityKind::Click,
++            AgentEvent::Axis { .. } => AgentActivityKind::Scroll,
++            AgentEvent::Motion { .. } | AgentEvent::PointerLeave => AgentActivityKind::Pointer,
++        })
++        .max_by_key(|kind| match kind {
++            AgentActivityKind::Keyboard => 3,
++            AgentActivityKind::Click => 2,
++            AgentActivityKind::Scroll => 1,
++            _ => 0,
++        })
++}
++
 +fn same_client(surface: &WlSurface, client: &Client) -> bool {
 +    surface.client().is_some_and(|c| c.id() == client.id())
 +}
@@ -520,11 +592,12 @@ index 0000000..967266d
 +
 +        let pointer = self.niri.seat.get_pointer().unwrap();
 +        let keyboard = self.niri.seat.get_keyboard().unwrap();
-+        if pointer
++        let real_pointer_on_client = pointer
 +            .current_focus()
-+            .is_some_and(|s| same_client(&s, &client))
-+        {
-+            return Err(String::from("target client holds the real pointer focus"));
++            .is_some_and(|s| same_client(&s, &client));
++        if real_pointer_on_client && pointer.is_grabbed() {
++            // E.g. the user is dragging or holding a button in that client.
++            return Err(String::from("the real pointer is interacting with the target client"));
 +        }
 +        if keyboard
 +            .current_focus()
@@ -544,6 +617,7 @@ index 0000000..967266d
 +            .is_some_and(|s| !s.is_alive() || !same_client(s, &client))
 +        {
 +            state.pointer = None;
++            state.buttons.clear();
 +        }
 +        if state
 +            .keyboard
@@ -563,8 +637,34 @@ index 0000000..967266d
 +            self.agent_send_seat_keymap(&client);
 +        }
 +
++        let kind = activity_kind(&events);
++
++        // Protocol events carry no surface after enter, so a client cannot tell two pointers
++        // apart. Hold the real pointer back from the client while the agent pointer drives it:
++        // the real pointer leaves the client's surfaces now, and re-enters them once the hold
++        // expires.
++        let pointer_events = events.iter().any(|e| {
++            matches!(
++                e,
++                AgentEvent::Motion { .. }
++                    | AgentEvent::Button { .. }
++                    | AgentEvent::Axis { .. }
++                    | AgentEvent::PointerLeave
++            )
++        });
++        if pointer_events {
++            self.agent_hold_pointer(&client);
++            if pointer
++                .current_focus()
++                .is_some_and(|s| same_client(&s, &client))
++            {
++                return Err(String::from("target client holds the real pointer focus"));
++            }
++        }
++
 +        let mut pointer_stale = self.niri.agent_input.pointer.is_some()
-+            && self.niri.agent_input.pointer_real_enter != pointer.last_enter();
++            && (real_pointer_on_client
++                || self.niri.agent_input.pointer_real_enter != pointer.last_enter());
 +
 +        let geometry_loc = window.geometry().loc.to_f64();
 +
@@ -620,6 +720,11 @@ index 0000000..967266d
 +
 +                    if let Some(cursor) = self.niri.agent_input.cursors.get_mut(&window_id) {
 +                        cursor.set_pressed(pressed, Instant::now());
++                    }
++                    let buttons = &mut self.niri.agent_input.buttons;
++                    buttons.retain(|b| *b != button);
++                    if pressed {
++                        buttons.push(button);
 +                    }
 +
 +                    let state = if pressed {
@@ -686,7 +791,88 @@ index 0000000..967266d
 +        // Let the window draw the result promptly even if it is off-screen.
 +        self.agent_pump_window(window_id);
 +
++        if pointer_events {
++            // Extend the hold from the end of the input (and while a button is held).
++            self.agent_hold_pointer(&client);
++        }
++
++        if let Some(kind) = kind {
++            self.ipc_agent_input_activity(window_id, kind);
++        }
++
 +        Ok(())
++    }
++
++    /// Hold the real pointer back from `client` (see `AgentInputState::pointer_hold`).
++    fn agent_hold_pointer(&mut self, client: &Client) {
++        let state = &mut self.niri.agent_input;
++        let duration = if state.buttons.is_empty() {
++            AGENT_POINTER_HOLD
++        } else {
++            AGENT_DRIVEN_TIMEOUT
++        };
++        let until = Instant::now() + duration;
++        state.pointer_hold = Some((client.id(), until));
++
++        // Move the real pointer focus off the client's surfaces right away. Unlike
++        // refresh_pointer_contents(), update_pointer_contents() also works during transitions.
++        let pointer = self.niri.seat.get_pointer().unwrap();
++        if self.update_pointer_contents() {
++            pointer.frame(self);
++            self.niri.queue_redraw_all();
++        }
++
++        let result = self
++            .niri
++            .event_loop
++            .insert_source(Timer::from_deadline(until), |_, _, state| {
++                state.agent_pointer_hold_expired();
++                TimeoutAction::Drop
++            });
++        if let Err(err) = result {
++            warn!("error scheduling agent pointer hold expiry: {err}");
++        }
++    }
++
++    /// Release an expired pointer hold. refresh() then gives the real pointer its focus back.
++    fn agent_pointer_hold_expired(&mut self) {
++        let state = &mut self.niri.agent_input;
++        let Some((client, until)) = state.pointer_hold.clone() else {
++            return;
++        };
++        if until > Instant::now() {
++            // Extended since this timer was scheduled.
++            return;
++        }
++        state.pointer_hold = None;
++
++        // If the real pointer is about to enter the client, leave the agent's surface first so
++        // the client does not get two enters in a row.
++        let pointer = self.niri.seat.get_pointer().unwrap();
++        let under = self.niri.contents_under(pointer.current_location());
++        let real_enters = under
++            .surface
++            .as_ref()
++            .and_then(|(s, _)| s.client())
++            .is_some_and(|c| c.id() == client);
++        let agent_surface = self
++            .niri
++            .agent_input
++            .pointer
++            .take_if(|s| s.client().is_some_and(|c| c.id() == client));
++        if let (true, Some(surface)) = (real_enters, &agent_surface) {
++            if let Some(client) = surface.client() {
++                for ptr in pointer.client_pointers(&client) {
++                    ptr.leave(self.niri.agent_input.next_serial(), surface);
++                    if ptr.version() >= 5 {
++                        ptr.frame();
++                    }
++                }
++            }
++        } else {
++            // Still entered.
++            self.niri.agent_input.pointer = agent_surface;
++        }
 +    }
 +
 +    /// Enter the agent keyboard on the topmost agent popup of the window, or the toplevel, if it
@@ -943,6 +1129,7 @@ index 0000000..967266d
 +            .map(|(_, m)| m.toplevel().wl_surface().clone())
 +            .ok_or_else(|| format!("no window with id {window_id} on an output"))?;
 +        self.agent_mark_window(window_id);
++        self.ipc_agent_input_activity(window_id, AgentActivityKind::Screenshot);
 +
 +        let recently_pumped = self.niri.agent_input.pumped.contains_key(&window_id);
 +        if !recently_pumped && !has_pending_frame_callbacks(&root) {
@@ -1341,10 +1528,35 @@ index 38440c9..a831617 100644
          // We need to hand out the grab in a way consistent with what update_keyboard_focus()
          // thinks the current focus is, otherwise it will desync and cause weird issues with
          // keyboard focus being at the wrong place.
+diff --git a/src/ipc/client.rs b/src/ipc/client.rs
+index 40a58ef..ba56d61 100644
+--- a/src/ipc/client.rs
++++ b/src/ipc/client.rs
+@@ -506,6 +506,9 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
+                     Event::CastStopped { stream_id } => {
+                         println!("Cast stopped: stream id {stream_id}");
+                     }
++                    Event::AgentInputActivity { window_id, kind } => {
++                        println!("Agent input activity: window {window_id}: {kind:?}");
++                    }
+                 }
+             }
+         }
 diff --git a/src/ipc/server.rs b/src/ipc/server.rs
-index db71da6..dca8ffe 100644
+index db71da6..8e202e8 100644
 --- a/src/ipc/server.rs
 +++ b/src/ipc/server.rs
+@@ -17,8 +17,8 @@ use futures_util::{select_biased, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, Fu
+ use niri_config::OutputName;
+ use niri_ipc::state::{EventStreamState, EventStreamStatePart as _};
+ use niri_ipc::{
+-    Action, Event, KeyboardLayouts, OutputConfigChanged, Overview, Reply, Request, Response,
+-    Timestamp, WindowLayout, Workspace,
++    Action, AgentActivityKind, Event, KeyboardLayouts, OutputConfigChanged, Overview, Reply,
++    Request, Response, Timestamp, WindowLayout, Workspace,
+ };
+ use smithay::desktop::layer_map_for_output;
+ use smithay::input::pointer::{
 @@ -455,6 +455,35 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
              let casts = state.casts.casts.values().cloned().collect();
              Response::Casts(casts)
@@ -1381,6 +1593,22 @@ index db71da6..dca8ffe 100644
      };
  
      Ok(response)
+@@ -932,6 +961,15 @@ impl State {
+         server.send_event(event);
+     }
+ 
++    pub fn ipc_agent_input_activity(&mut self, window_id: u64, kind: AgentActivityKind) {
++        let Some(server) = &self.niri.ipc_server else {
++            return;
++        };
++
++        // Transient: there's no state to apply.
++        server.send_event(Event::AgentInputActivity { window_id, kind });
++    }
++
+     pub fn ipc_screenshot_taken(&mut self, path: Option<String>) {
+         let Some(server) = &self.niri.ipc_server else {
+             return;
 diff --git a/src/layout/mod.rs b/src/layout/mod.rs
 index 5c4dd63..076d78c 100644
 --- a/src/layout/mod.rs
@@ -1428,7 +1656,7 @@ index d516838..dec17d5 100644
  pub mod backend;
  pub mod cli;
 diff --git a/src/niri.rs b/src/niri.rs
-index ec40e01..6e07d2a 100644
+index ec40e01..7e10719 100644
 --- a/src/niri.rs
 +++ b/src/niri.rs
 @@ -393,6 +393,7 @@ pub struct Niri {
@@ -1456,7 +1684,24 @@ index ec40e01..6e07d2a 100644
              pick_color: None,
  
              debug_draw_opaque_regions: false,
-@@ -5581,6 +5585,21 @@ impl Niri {
+@@ -3447,6 +3451,16 @@ impl Niri {
+             return rv;
+         };
+ 
++        // A computer-use agent pointer is driving this client: the real pointer must not focus
++        // its surfaces meanwhile (see AgentInputState::pointer_hold).
++        if surface_and_pos
++            .as_ref()
++            .and_then(|(surface, _)| surface.client())
++            .is_some_and(|client| self.agent_input.holds_pointer(&client.id()))
++        {
++            surface_and_pos = None;
++        }
++
+         if let Some((_, surface_pos)) = &mut surface_and_pos {
+             *surface_pos += output_pos_in_global_space.to_f64();
+         }
+@@ -5581,6 +5595,21 @@ impl Niri {
          show_pointer: bool,
          path: Option<String>,
      ) -> anyhow::Result<()> {
@@ -1478,7 +1723,7 @@ index ec40e01..6e07d2a 100644
          let _span = tracy_client::span!("Niri::screenshot_window");
  
          let scale = Scale::from(output.current_scale().fractional_scale());
-@@ -5636,8 +5655,10 @@ impl Niri {
+@@ -5636,8 +5665,10 @@ impl Niri {
              elements,
          )?;
  
