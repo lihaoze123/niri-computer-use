@@ -63,6 +63,7 @@ GTK 应用需要在按键按下**之后**收到移动事件才会进入拖拽状
 
 - `getApp(id)` 找不到运行中的窗口时，从 XDG/NixOS 应用目录解析 `.desktop` 条目，为启动进程重建唯一的 niri Wayland 会话环境，启动后绑定新窗口。接受精确的 desktop app id 或无歧义的显示名；已有窗口按显示名复用。
 - 新增 `toggleMaximize()`，按绑定的 niri 窗口 id 切换最大化。
+- 将 `cua.computer` 的接口复制到普通对象后再添加 `launch_app`。上游 Sky 对象是 Proxy，其 `get` 只读取内部客户端，直接向 Proxy 写入函数后无法读回，会报 `launch_app is not a function`。
 - 适配 Desktop 26.917 的 Linux CUA 接口：
   - `listWindows()`、`getApp({ windowId })`、`computer.launch_app()`；
   - 滚动距离从像素换算成页（`pixels / 500`，至少 1）；

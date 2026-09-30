@@ -12,8 +12,8 @@
 +    }));
 +    return emit(windows, options);
 +  };
-+  cua.computer ??= {};
-+  cua.computer.launch_app = async ({ app }) => { await call('launch_app', app); };
++  cua.computer = { ...cua.computer,
++    launch_app: async ({ app }) => { await call('launch_app', app); } };
    const linuxState = async (options = {}) => {
      const state = browserState ? await browserState({ emit: false }) : { browsers: [] };
 -    return emit({ ...state, apps: await cua.listApps({ emit: false }) }, options);
