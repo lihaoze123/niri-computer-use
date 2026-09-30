@@ -51,6 +51,36 @@ smithay 公开的 `PointerHandle::client_pointers` / `KeyboardHandle::client_key
 | `screenshot-window` 弹通知、覆盖剪贴板 | `AgentScreenshot` 只写文件 |
 | 屏幕外的窗口每秒只收到约 1 次帧回调，agent 操作后截图是旧画面 | agent 输入或截图过的窗口在 2 秒内按约 60 Hz 补发帧回调（帧泵）；截图等窗口 50 ms 无新提交（最多 500 ms）再截。空闲窗口立即截图 |
 
+## 观察 agent 在做什么
+
+agent 操作的窗口通常不在你的焦点上，补丁提供两种可见的提示：
+
+- **agent 光标**：agent 指针画成一个靛蓝到紫色的渐变圆点，带白色描边和一圈淡光晕；另有一圈半透明深色细线，保证在浅色页面上也清楚。移动时约 180 ms 缓动滑到新位置，按下按钮时光晕收紧，同时扩散一圈涟漪。它随窗口一起移动和缩放（包括 overview），不会出现在 `AgentScreenshot` 里。
+- **`is-agent-driven` 窗口规则**：窗口在 30 秒内收到过 `AgentInput` 或 `AgentScreenshot` 时匹配。超时后光标和规则一起消失。
+
+推荐的规则写法：用同色系的细渐变边框，加一圈柔和的外发光：
+
+```kdl
+window-rule {
+    match is-agent-driven=true
+    border {
+        on
+        width 2
+        active-gradient from="#818cf8" to="#c084fc" angle=135
+        inactive-gradient from="#818cf8" to="#c084fc" angle=135
+    }
+    shadow {
+        on
+        softness 40
+        spread 3
+        offset x=0 y=0
+        color "#a78bfa70"
+    }
+}
+```
+
+只有窗口可见时才能直接看到这些提示。窗口不在视野里时，可以用窗口投屏（xdg-desktop-portal，例如 OBS）另开一个预览：预览器是另一个客户端，聚焦它不影响 agent。窗口投屏不包含 agent 光标。
+
 ## 已知限制
 
 - **同一进程冲突**：你和 agent 不能同时使用同一个客户端的窗口（例如同一个 Edge 进程的两个窗口）。让 agent 使用单独的浏览器 profile。

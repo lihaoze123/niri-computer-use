@@ -1,3 +1,44 @@
+diff --git a/niri-config/src/lib.rs b/niri-config/src/lib.rs
+index 329b766..25a0cd5 100644
+--- a/niri-config/src/lib.rs
++++ b/niri-config/src/lib.rs
+@@ -1725,6 +1725,7 @@ mod tests {
+                             is_active_in_column: None,
+                             is_floating: None,
+                             is_window_cast_target: None,
++                            is_agent_driven: None,
+                             is_urgent: None,
+                             at_startup: None,
+                         },
+@@ -1744,6 +1745,7 @@ mod tests {
+                             is_active_in_column: None,
+                             is_floating: None,
+                             is_window_cast_target: None,
++                            is_agent_driven: None,
+                             is_urgent: None,
+                             at_startup: None,
+                         },
+@@ -1759,6 +1761,7 @@ mod tests {
+                             is_active_in_column: None,
+                             is_floating: None,
+                             is_window_cast_target: None,
++                            is_agent_driven: None,
+                             is_urgent: None,
+                             at_startup: None,
+                         },
+diff --git a/niri-config/src/window_rule.rs b/niri-config/src/window_rule.rs
+index f2bc2ad..3c5f943 100644
+--- a/niri-config/src/window_rule.rs
++++ b/niri-config/src/window_rule.rs
+@@ -134,6 +134,8 @@ pub struct Match {
+     #[knuffel(property)]
+     pub is_window_cast_target: Option<bool>,
+     #[knuffel(property)]
++    pub is_agent_driven: Option<bool>,
++    #[knuffel(property)]
+     pub is_urgent: Option<bool>,
+     #[knuffel(property)]
+     pub at_startup: Option<bool>,
 diff --git a/niri-ipc/src/lib.rs b/niri-ipc/src/lib.rs
 index 0aa3cb4..a3b4682 100644
 --- a/niri-ipc/src/lib.rs
@@ -120,10 +161,10 @@ index 0aa3cb4..a3b4682 100644
      /// Information about connected outputs.
 diff --git a/src/agent_input.rs b/src/agent_input.rs
 new file mode 100644
-index 0000000..d06b5bf
+index 0000000..967266d
 --- /dev/null
 +++ b/src/agent_input.rs
-@@ -0,0 +1,837 @@
+@@ -0,0 +1,1061 @@
 +//! Per-client "virtual focus" input for computer-use agents.
 +//!
 +//! Wayland input objects are per client: every client has its own `wl_pointer` and `wl_keyboard`
@@ -147,10 +188,12 @@ index 0000000..d06b5bf
 +use std::time::{Duration, Instant};
 +
 +use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
-+use smithay::utils::{IsAlive, Logical, Point, Serial, SERIAL_COUNTER};
++use niri_config::{Color, CornerRadius, GradientInterpolation};
++use smithay::utils::{IsAlive, Logical, Point, Rectangle, Serial, Size, SERIAL_COUNTER};
 +use smithay::wayland::compositor::{with_surface_tree_downward, SurfaceAttributes, TraversalAction};
 +
-+use crate::niri::State;
++use crate::niri::{Niri, State};
++use crate::render_helpers::border::BorderRenderElement;
 +use tracing::warn;
 +use crate::utils::get_monotonic_time;
 +
@@ -181,6 +224,12 @@ index 0000000..d06b5bf
 +    /// visible, so agent input and screenshots see up-to-date content.
 +    pumped: HashMap<u64, Instant>,
 +    pump_running: bool,
++    /// Windows (by id) that recently received agent input or screenshots, and when. They match
++    /// the `is-agent-driven` window rule.
++    windows: HashMap<u64, Instant>,
++    /// Agent pointer indicators by window id, shown while the window is agent-driven.
++    cursors: HashMap<u64, AgentCursor>,
++    expiry_running: bool,
 +}
 +
 +#[derive(Debug)]
@@ -206,6 +255,144 @@ index 0000000..d06b5bf
 +const AGENT_SHOT_QUIET: Duration = Duration::from_millis(50);
 +/// ...or after this long at most.
 +const AGENT_SHOT_MAX_WAIT: Duration = Duration::from_millis(500);
++
++/// Agent pointer indicator animations.
++const CURSOR_APPEAR: Duration = Duration::from_millis(160);
++const CURSOR_GLIDE: Duration = Duration::from_millis(180);
++const CURSOR_RIPPLE: Duration = Duration::from_millis(520);
++
++/// Agent pointer indicator colors: an indigo-to-violet gradient.
++const CURSOR_FROM: [u8; 3] = [0x81, 0x8c, 0xf8];
++const CURSOR_TO: [u8; 3] = [0xc0, 0x84, 0xfc];
++
++/// The agent's pointer as drawn on its window: a gradient dot with a white outline and a soft
++/// halo. It glides to new positions, and a ring ripples out when a button is pressed.
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub struct AgentCursor {
++    shown_at: Instant,
++    /// Glide from `from` to `to` (relative to the window geometry), started at `moved_at`.
++    from: Point<f64, Logical>,
++    to: Point<f64, Logical>,
++    moved_at: Instant,
++    pressed: bool,
++    ripple: Option<(Point<f64, Logical>, Instant)>,
++}
++
++fn ease_out_cubic(t: f64) -> f64 {
++    1. - (1. - t).powi(3)
++}
++
++fn progress(since: Instant, now: Instant, duration: Duration) -> f64 {
++    (now.saturating_duration_since(since).as_secs_f64() / duration.as_secs_f64()).clamp(0., 1.)
++}
++
++fn cursor_color([r, g, b]: [u8; 3], alpha: f32) -> Color {
++    Color::from_rgba8_unpremul(r, g, b, (alpha * 255.) as u8)
++}
++
++impl AgentCursor {
++    fn new(pos: Point<f64, Logical>, now: Instant) -> Self {
++        Self {
++            shown_at: now,
++            from: pos,
++            to: pos,
++            moved_at: now,
++            pressed: false,
++            ripple: None,
++        }
++    }
++
++    fn position(&self, now: Instant) -> Point<f64, Logical> {
++        let t = ease_out_cubic(progress(self.moved_at, now, CURSOR_GLIDE));
++        self.from + (self.to - self.from).upscale(t)
++    }
++
++    fn move_to(&mut self, pos: Point<f64, Logical>, now: Instant) {
++        self.from = self.position(now);
++        self.to = pos;
++        self.moved_at = now;
++    }
++
++    fn set_pressed(&mut self, pressed: bool, now: Instant) {
++        if pressed && !self.pressed {
++            self.ripple = Some((self.to, now));
++        }
++        self.pressed = pressed;
++    }
++
++    pub fn is_animating(&self, now: Instant) -> bool {
++        progress(self.shown_at, now, CURSOR_APPEAR) < 1.
++            || progress(self.moved_at, now, CURSOR_GLIDE) < 1.
++            || self
++                .ripple
++                .is_some_and(|(_, at)| progress(at, now, CURSOR_RIPPLE) < 1.)
++    }
++
++    /// Renders the indicator for a window whose visual geometry is at `origin`.
++    pub fn render(
++        &self,
++        origin: Point<f64, Logical>,
++        scale: f32,
++        push: &mut dyn FnMut(BorderRenderElement),
++    ) {
++        let now = Instant::now();
++        let appear = ease_out_cubic(progress(self.shown_at, now, CURSOR_APPEAR));
++
++        // A circle (or a ring when `width > 0`) centered at `center`.
++        let circle = |center: Point<f64, Logical>,
++                      diameter: f64,
++                      from: Color,
++                      to: Color,
++                      width: f32,
++                      alpha: f32| {
++            let size = Size::from((diameter, diameter));
++            BorderRenderElement::new(
++                size,
++                Rectangle::from_size(size),
++                GradientInterpolation::default(),
++                from,
++                to,
++                45f32.to_radians(),
++                Rectangle::from_size(size),
++                width,
++                CornerRadius::from(diameter as f32 / 2.),
++                scale,
++                alpha,
++            )
++            .with_location(origin + center - Point::from((diameter / 2., diameter / 2.)))
++        };
++
++        let center = self.position(now);
++        let grow = 0.6 + 0.4 * appear;
++        let alpha = appear as f32;
++        let white = Color::from_rgba8_unpremul(255, 255, 255, 245);
++        let shade = Color::from_rgba8_unpremul(0, 0, 0, 70);
++
++        // Topmost first: dot, white outline, dark hairline for light backgrounds.
++        let from = cursor_color(CURSOR_FROM, 1.);
++        let to = cursor_color(CURSOR_TO, 1.);
++        push(circle(center, 10. * grow, from, to, 0., alpha));
++        push(circle(center, 14. * grow, white, white, 0., alpha));
++        push(circle(center, 16. * grow, shade, shade, 0., alpha));
++
++        if let Some((at, started)) = self.ripple {
++            let t = progress(started, now, CURSOR_RIPPLE);
++            if t < 1. {
++                let e = ease_out_cubic(t);
++                let from = cursor_color(CURSOR_FROM, 0.9);
++                let to = cursor_color(CURSOR_TO, 0.9);
++                let width = (2.5 - 1.5 * e) as f32;
++                push(circle(at, 14. + 42. * e, from, to, width, (1. - e) as f32));
++            }
++        }
++
++        // The halo tightens while a button is held.
++        let (halo, halo_alpha) = if self.pressed { (24., 0.3) } else { (34., 0.16) };
++        let from = cursor_color(CURSOR_FROM, halo_alpha);
++        let to = cursor_color(CURSOR_TO, halo_alpha);
++        push(circle(center, halo * grow, from, to, 0., alpha));
++    }
++}
 +
 +/// Environment variable marking processes launched by an agent. Their windows (and those of
 +/// their descendants, which inherit the environment) open without taking focus.
@@ -345,6 +532,7 @@ index 0000000..d06b5bf
 +        {
 +            return Err(String::from("target client holds the real keyboard focus"));
 +        }
++        self.agent_mark_window(window_id);
 +
 +        // Drop state that belongs to dead surfaces or another client.
 +        let state = &mut self.niri.agent_input;
@@ -406,6 +594,13 @@ index 0000000..d06b5bf
 +                    }
 +                    self.niri.agent_input.pointer = Some(surface);
 +                    self.niri.agent_input.pointer_real_enter = pointer.last_enter();
++                    let (pos, now) = (Point::from((x, y)), Instant::now());
++                    self.niri
++                        .agent_input
++                        .cursors
++                        .entry(window_id)
++                        .and_modify(|c| c.move_to(pos, now))
++                        .or_insert_with(|| AgentCursor::new(pos, now));
 +                }
 +                AgentEvent::Button { button, pressed } => {
 +                    if self.niri.agent_input.pointer.is_none() {
@@ -421,6 +616,10 @@ index 0000000..d06b5bf
 +                        for popup in self.niri.agent_input.take_popups(&toplevel) {
 +                            let _ = PopupManager::dismiss_popup(&toplevel, &popup);
 +                        }
++                    }
++
++                    if let Some(cursor) = self.niri.agent_input.cursors.get_mut(&window_id) {
++                        cursor.set_pressed(pressed, Instant::now());
 +                    }
 +
 +                    let state = if pressed {
@@ -455,6 +654,7 @@ index 0000000..d06b5bf
 +                    }
 +                }
 +                AgentEvent::PointerLeave => {
++                    self.niri.agent_input.cursors.remove(&window_id);
 +                    if let Some(surface) = self.niri.agent_input.pointer.take() {
 +                        for ptr in pointer.client_pointers(&client) {
 +                            ptr.leave(self.niri.agent_input.next_serial(), &surface);
@@ -742,6 +942,7 @@ index 0000000..d06b5bf
 +            .find(|(mon, m)| m.id().get() == window_id && mon.is_some())
 +            .map(|(_, m)| m.toplevel().wl_surface().clone())
 +            .ok_or_else(|| format!("no window with id {window_id} on an output"))?;
++        self.agent_mark_window(window_id);
 +
 +        let recently_pumped = self.niri.agent_input.pumped.contains_key(&window_id);
 +        if !recently_pumped && !has_pending_frame_callbacks(&root) {
@@ -809,6 +1010,42 @@ index 0000000..d06b5bf
 +            let _ = done.send_blocking(Err(err));
 +        }
 +        true
++    }
++
++    /// Mark a window as agent-driven for a while.
++    fn agent_mark_window(&mut self, window_id: u64) {
++        let state = &mut self.niri.agent_input;
++        state.windows.insert(window_id, Instant::now());
++        if state.expiry_running {
++            return;
++        }
++        state.expiry_running = true;
++        // The timer only wakes up the event loop; refresh() drops expired windows.
++        let result = self.niri.event_loop.insert_source(
++            Timer::from_duration(AGENT_DRIVEN_TIMEOUT),
++            |_, _, state| {
++                let now = Instant::now();
++                let next = state
++                    .niri
++                    .agent_input
++                    .windows
++                    .values()
++                    .map(|t| (*t + AGENT_DRIVEN_TIMEOUT).saturating_duration_since(now))
++                    .filter(|d| !d.is_zero())
++                    .min();
++                match next {
++                    Some(next) => TimeoutAction::ToDuration(next),
++                    None => {
++                        state.niri.agent_input.expiry_running = false;
++                        TimeoutAction::Drop
++                    }
++                }
++            },
++        );
++        if let Err(err) = result {
++            warn!("error scheduling agent window expiry: {err}");
++            self.niri.agent_input.expiry_running = false;
++        }
 +    }
 +
 +    /// Keep sending paced frame callbacks to a window for a while, visible or not.
@@ -958,6 +1195,34 @@ index 0000000..d06b5bf
 +                locked,
 +                group,
 +            );
++        }
++    }
++}
++
++impl Niri {
++    /// Sync agent-driven state and the agent pointer indicator to mapped windows.
++    pub fn refresh_mapped_agent_state(&mut self) {
++        let state = &mut self.agent_input;
++        state
++            .windows
++            .retain(|_, t| t.elapsed() < AGENT_DRIVEN_TIMEOUT);
++        let windows = &state.windows;
++        state.cursors.retain(|id, _| windows.contains_key(id));
++        let cursors = &state.cursors;
++
++        let now = Instant::now();
++        let mut redraw = Vec::new();
++        self.layout.with_windows_mut(|mapped, output| {
++            let id = mapped.id().get();
++            mapped.set_is_agent_driven(windows.contains_key(&id));
++            let cursor = cursors.get(&id).copied();
++            let changed = mapped.set_agent_cursor(cursor);
++            if changed || cursor.is_some_and(|c| c.is_animating(now)) {
++                redraw.extend(output.cloned());
++            }
++        });
++        for output in redraw {
++            self.queue_redraw(&output);
 +        }
 +    }
 +}
@@ -1116,6 +1381,40 @@ index db71da6..dca8ffe 100644
      };
  
      Ok(response)
+diff --git a/src/layout/mod.rs b/src/layout/mod.rs
+index 5c4dd63..076d78c 100644
+--- a/src/layout/mod.rs
++++ b/src/layout/mod.rs
+@@ -246,6 +246,11 @@ pub trait LayoutElement {
+ 
+     fn is_urgent(&self) -> bool;
+ 
++    /// The computer-use agent's pointer, rendered as an indicator on the tile.
++    fn agent_cursor(&self) -> Option<crate::agent_input::AgentCursor> {
++        None
++    }
++
+     fn configure_intent(&self) -> ConfigureIntent;
+     fn send_pending_configure(&mut self);
+ 
+diff --git a/src/layout/tile.rs b/src/layout/tile.rs
+index 86c7eba..8f482a4 100644
+--- a/src/layout/tile.rs
++++ b/src/layout/tile.rs
+@@ -1074,6 +1074,13 @@ impl<W: LayoutElement> Tile<W> {
+             .geometry_corner_radius()
+             .scaled_by(1. - expanded_progress as f32);
+ 
++        // The computer-use agent pointer goes above everything, including popups.
++        if let Some(cursor) = self.window.agent_cursor() {
++            if BorderRenderElement::has_shader(ctx.renderer) {
++                cursor.render(window_render_loc, scale.x as f32, &mut |elem| push(elem.into()));
++            }
++        }
++
+         // Popups go on top, whether it's resize or not.
+         self.window.render_popups(
+             ctx.r(),
 diff --git a/src/lib.rs b/src/lib.rs
 index d516838..dec17d5 100644
 --- a/src/lib.rs
@@ -1129,7 +1428,7 @@ index d516838..dec17d5 100644
  pub mod backend;
  pub mod cli;
 diff --git a/src/niri.rs b/src/niri.rs
-index ec40e01..aa95296 100644
+index ec40e01..6e07d2a 100644
 --- a/src/niri.rs
 +++ b/src/niri.rs
 @@ -393,6 +393,7 @@ pub struct Niri {
@@ -1140,7 +1439,16 @@ index ec40e01..aa95296 100644
      pub pick_color: Option<async_channel::Sender<Option<niri_ipc::PickedColor>>>,
  
      pub debug_draw_opaque_regions: bool,
-@@ -2604,6 +2605,7 @@ impl Niri {
+@@ -824,6 +825,8 @@ impl State {
+         #[cfg(feature = "xdp-gnome-screencast")]
+         self.niri.refresh_mapped_cast_window_rules();
+         self.ipc_refresh_casts();
++        // Should happen before refresh_window_rules().
++        self.niri.refresh_mapped_agent_state();
+ 
+         self.niri.refresh_window_rules();
+         self.refresh_ipc_outputs();
+@@ -2604,6 +2607,7 @@ impl Niri {
              pending_mru_commit: None,
  
              pick_window: None,
@@ -1148,7 +1456,7 @@ index ec40e01..aa95296 100644
              pick_color: None,
  
              debug_draw_opaque_regions: false,
-@@ -5581,6 +5583,21 @@ impl Niri {
+@@ -5581,6 +5585,21 @@ impl Niri {
          show_pointer: bool,
          path: Option<String>,
      ) -> anyhow::Result<()> {
@@ -1170,7 +1478,7 @@ index ec40e01..aa95296 100644
          let _span = tracy_client::span!("Niri::screenshot_window");
  
          let scale = Scale::from(output.current_scale().fractional_scale());
-@@ -5636,8 +5653,10 @@ impl Niri {
+@@ -5636,8 +5655,10 @@ impl Niri {
              elements,
          )?;
  
@@ -1183,3 +1491,115 @@ index ec40e01..aa95296 100644
      }
  
      pub fn save_screenshot(
+diff --git a/src/window/mapped.rs b/src/window/mapped.rs
+index 3db1f66..ca024dd 100644
+--- a/src/window/mapped.rs
++++ b/src/window/mapped.rs
+@@ -22,6 +22,7 @@ use smithay::wayland::shell::xdg::{
+ use wayland_backend::server::Credentials;
+ 
+ use super::{ResolvedWindowRules, WindowRef};
++use crate::agent_input::AgentCursor;
+ use crate::handlers::KdeDecorationsModeState;
+ use crate::layout::{
+     ConfigureIntent, InteractiveResizeData, LayoutElement, LayoutElementRenderElement,
+@@ -100,6 +101,12 @@ pub struct Mapped {
+     /// Whether this window is a target of a window cast.
+     is_window_cast_target: bool,
+ 
++    /// Whether this window recently received computer-use agent input or screenshots.
++    is_agent_driven: bool,
++
++    /// The agent's pointer indicator.
++    agent_cursor: Option<AgentCursor>,
++
+     /// Whether this window should ignore opacity set through window rules.
+     ignore_opacity_window_rule: bool,
+ 
+@@ -290,6 +297,8 @@ impl Mapped {
+             is_active_in_column: true,
+             is_floating: false,
+             is_window_cast_target: false,
++            is_agent_driven: false,
++            agent_cursor: None,
+             ignore_opacity_window_rule: false,
+             block_out_buffer: RefCell::new(SolidColorBuffer::new((0., 0.), [0., 0., 0., 1.])),
+             blur_config: config.blur,
+@@ -383,6 +392,10 @@ impl Mapped {
+         self.is_window_cast_target
+     }
+ 
++    pub fn is_agent_driven(&self) -> bool {
++        self.is_agent_driven
++    }
++
+     pub fn toggle_ignore_opacity_window_rule(&mut self) {
+         self.ignore_opacity_window_rule = !self.ignore_opacity_window_rule;
+     }
+@@ -406,6 +419,25 @@ impl Mapped {
+         self.need_to_recompute_rules = true;
+     }
+ 
++    pub fn set_is_agent_driven(&mut self, value: bool) {
++        if self.is_agent_driven == value {
++            return;
++        }
++
++        self.is_agent_driven = value;
++        self.need_to_recompute_rules = true;
++    }
++
++    /// Returns whether the cursor changed.
++    pub fn set_agent_cursor(&mut self, cursor: Option<AgentCursor>) -> bool {
++        if self.agent_cursor == cursor {
++            return false;
++        }
++
++        self.agent_cursor = cursor;
++        true
++    }
++
+     /// Renders a snapshot of the window without popups.
+     fn render_snapshot(&self, renderer: &mut GlesRenderer) -> LayoutElementRenderSnapshot {
+         let _span = tracy_client::span!("Mapped::render_snapshot");
+@@ -978,6 +1010,10 @@ impl LayoutElement for Mapped {
+         self.is_urgent
+     }
+ 
++    fn agent_cursor(&self) -> Option<AgentCursor> {
++        self.agent_cursor
++    }
++
+     fn set_activated(&mut self, active: bool) {
+         let changed = self.toplevel().with_pending_state(|state| {
+             if active {
+diff --git a/src/window/mod.rs b/src/window/mod.rs
+index 14527cd..b07040d 100644
+--- a/src/window/mod.rs
++++ b/src/window/mod.rs
+@@ -177,6 +177,13 @@ impl<'a> WindowRef<'a> {
+             WindowRef::Mapped(mapped) => mapped.is_window_cast_target(),
+         }
+     }
++
++    pub fn is_agent_driven(self) -> bool {
++        match self {
++            WindowRef::Unmapped(_) => false,
++            WindowRef::Mapped(mapped) => mapped.is_agent_driven(),
++        }
++    }
+ }
+ 
+ impl ResolvedWindowRules {
+@@ -445,5 +452,11 @@ fn window_matches(window: WindowRef, role: &XdgToplevelSurfaceRoleAttributes, m:
+         }
+     }
+ 
++    if let Some(is_agent_driven) = m.is_agent_driven {
++        if window.is_agent_driven() != is_agent_driven {
++            return false;
++        }
++    }
++
+     true
+ }
