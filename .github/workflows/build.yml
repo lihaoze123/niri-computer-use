@@ -1,0 +1,90 @@
+name: Build and cache
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            cores = 2
+            max-jobs = 2
+
+      - name: Check cache configuration
+        id: cache
+        env:
+          CACHIX_AUTH_TOKEN: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && secrets.CACHIX_AUTH_TOKEN || '' }}
+        run: |
+          if [[ -z "$CACHIX_CACHE_NAME" ]]; then
+            echo "::warning::Set the repository variable CACHIX_CACHE_NAME to enable Cachix."
+            echo "Cache: disabled; CACHIX_CACHE_NAME is not configured." >> "$GITHUB_STEP_SUMMARY"
+            echo "push=false" >> "$GITHUB_OUTPUT"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          elif ! curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+            "https://$CACHIX_CACHE_NAME.cachix.org/nix-cache-info" > /dev/null; then
+            echo "::warning::The public Cachix cache is unavailable; create it before enabling publication."
+            echo "Cache: $CACHIX_CACHE_NAME is unavailable; building without Cachix." >> "$GITHUB_STEP_SUMMARY"
+            echo "push=false" >> "$GITHUB_OUTPUT"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            if [[ -n "$CACHIX_AUTH_TOKEN" ]]; then
+              echo "push=true" >> "$GITHUB_OUTPUT"
+              echo "Cache: $CACHIX_CACHE_NAME; publishing enabled." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "push=false" >> "$GITHUB_OUTPUT"
+              echo "Cache: $CACHIX_CACHE_NAME; read only." >> "$GITHUB_STEP_SUMMARY"
+              if [[ "$GITHUB_EVENT_NAME" != "pull_request" && "$GITHUB_REF" == "refs/heads/main" ]]; then
+                echo "::warning::Set the repository secret CACHIX_AUTH_TOKEN to publish build results."
+              fi
+            fi
+          fi
+
+      - name: Configure Cachix
+        if: steps.cache.outputs.available == 'true'
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          authToken: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          skipPush: ${{ steps.cache.outputs.push != 'true' }}
+
+      - name: Evaluate flake
+        run: nix flake check --no-build --no-update-lock-file
+
+      - name: Build packages and run backend tests
+        run: |
+          nix build --no-link --no-update-lock-file --print-out-paths -L \
+            .#codex-computer-use-niri \
+            .#codex-desktop \
+            .#codex-computer-use
+
+      - name: Verify packaged entrypoints
+        run: |
+          desktop=$(nix eval --raw .#codex-desktop.outPath)
+          wrapper=$(nix eval --raw .#codex-computer-use.outPath)
+          test -x "$desktop/bin/codex-desktop"
+          test -f "$desktop/share/applications/codex-desktop.desktop"
+          "$wrapper/bin/codex-computer-use" --help

@@ -73,6 +73,7 @@ niri-computer-use/
 
 ## 文档
 
+- [docs/ci.md](docs/ci.md) — GitHub Actions 自动构建、Cachix 配置与缓存使用
 - [docs/architecture.md](docs/architecture.md) — 组件与数据流
 - [docs/nixos-module.md](docs/nixos-module.md) — 模块选项与它实际做了什么
 - [docs/patches.md](docs/patches.md) — 每个补丁解决的问题与设计取舍
