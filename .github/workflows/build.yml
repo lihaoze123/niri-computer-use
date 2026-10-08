@@ -68,15 +68,15 @@ jobs:
         uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:
           name: ${{ env.CACHIX_CACHE_NAME }}
-          authToken: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && secrets.CACHIX_AUTH_TOKEN || '' }}
-          skipPush: ${{ steps.cache.outputs.push != 'true' }}
+          skipPush: true
 
       - name: Build packages and run backend tests
         run: |
           nix build --no-link --no-update-lock-file --print-out-paths -L \
             .#codex-computer-use-niri \
             .#codex-desktop \
-            .#codex-computer-use
+            .#codex-computer-use > "$RUNNER_TEMP/computer-use-paths"
+          cat "$RUNNER_TEMP/computer-use-paths"
 
       # Cargo.lock is read from an applyPatches derivation. A fresh store must
       # realise that source before flake check can evaluate it in read-only mode.
@@ -90,3 +90,11 @@ jobs:
           test -x "$desktop/bin/codex-desktop"
           test -f "$desktop/share/applications/codex-desktop.desktop"
           "$wrapper/bin/codex-computer-use" --help
+
+      - name: Publish runtime closures to Cachix
+        if: steps.cache.outputs.push == 'true'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          cachix push "$CACHIX_CACHE_NAME" < "$RUNNER_TEMP/computer-use-paths"
+          echo "Published package runtime closures to $CACHIX_CACHE_NAME." >> "$GITHUB_STEP_SUMMARY"

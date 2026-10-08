@@ -30,8 +30,10 @@ PR 只从公共缓存读取，不上传。没有设置缓存名称时仍会构�
 公共缓存尚未创建或暂时不可访问时，会提示并继续构建，跳过缓存设置。
 每次运行的 Summary 会显示实际缓存状态。
 
-[cachix-action](https://github.com/cachix/cachix-action) 通过 Nix post-build hook
-上传新构建的路径，并在作业结束时等待上传完成。已经从其他缓存下载的路径不重复上传。
+[cachix-action](https://github.com/cachix/cachix-action) 安装 Cachix 并设置下载缓存源。
+构建、求值和入口检查全部通过后，通过
+[`cachix push`](https://docs.cachix.org/pushing#pushing-runtime-closure)
+上传三个成品包及其运行时依赖，控制缓存占用。上传失败会使工作流失败。
 
 ## 在 NixOS 上使用
 
