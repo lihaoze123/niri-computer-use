@@ -71,15 +71,17 @@ jobs:
           authToken: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && secrets.CACHIX_AUTH_TOKEN || '' }}
           skipPush: ${{ steps.cache.outputs.push != 'true' }}
 
-      - name: Evaluate flake
-        run: nix flake check --no-build --no-update-lock-file
-
       - name: Build packages and run backend tests
         run: |
           nix build --no-link --no-update-lock-file --print-out-paths -L \
             .#codex-computer-use-niri \
             .#codex-desktop \
             .#codex-computer-use
+
+      # Cargo.lock is read from an applyPatches derivation. A fresh store must
+      # realise that source before flake check can evaluate it in read-only mode.
+      - name: Evaluate flake
+        run: nix flake check --no-build --no-update-lock-file
 
       - name: Verify packaged entrypoints
         run: |

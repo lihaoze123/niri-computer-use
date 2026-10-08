@@ -4,6 +4,8 @@
 在 `main` 推送、PR 和手动触发时构建 `x86_64-linux` 包。
 工作流使用 `flake.lock` 的固定依赖，不自动升级上游；构建后端时同时运行 Rust 测试，
 并检查 Desktop 启动器和 MCP 包装命令。
+CI 先构建再运行 `nix flake check --no-build`：后端从补丁后的源码读取 `Cargo.lock`，
+首次运行需要先生成该源码路径，才能进行只读求值检查。
 
 ## 配置缓存
 
