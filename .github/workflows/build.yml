@@ -75,7 +75,8 @@ jobs:
           nix build --no-link --no-update-lock-file --print-out-paths -L \
             .#codex-computer-use-niri \
             .#codex-desktop \
-            .#codex-computer-use > "$RUNNER_TEMP/computer-use-paths"
+            .#codex-computer-use \
+            .#niri-patched > "$RUNNER_TEMP/computer-use-paths"
           cat "$RUNNER_TEMP/computer-use-paths"
 
       # Cargo.lock is read from an applyPatches derivation. A fresh store must
@@ -90,6 +91,8 @@ jobs:
           test -x "$desktop/bin/codex-desktop"
           test -f "$desktop/share/applications/codex-desktop.desktop"
           "$wrapper/bin/codex-computer-use" --help
+          niri=$(nix eval --raw .#niri-patched.outPath)
+          "$niri/bin/niri" --version
 
       - name: Publish runtime closures to Cachix
         if: steps.cache.outputs.push == 'true'

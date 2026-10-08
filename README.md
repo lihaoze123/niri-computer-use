@@ -55,7 +55,8 @@ niri-computer-use/
 ├── flake.nix                 # 输出 packages / nixosModules / formatter
 ├── flake.lock                # codex-desktop-linux 固定在补丁对应的版本
 ├── packages/
-│   └── codex-desktop.nix     # 补丁源码、Rust 后端、Desktop 覆盖、包装脚本
+│   ├── codex-desktop.nix     # 补丁源码、Rust 后端、Desktop 覆盖、包装脚本
+│   └── niri.nix              # CI 与 NixOS 模块共用的 Niri 补丁构建
 ├── modules/
 │   └── nixos.nix             # programs.codexComputerUse 模块
 ├── patches/                  # 7 个后端补丁 + 2 个 niri 补丁
@@ -69,6 +70,7 @@ niri-computer-use/
 | `packages.x86_64-linux.codex-desktop`（`default`） | 替换了后端二进制和 `.mjs` 适配层的 Codex Desktop |
 | `packages.x86_64-linux.codex-computer-use-niri` | 单独的补丁版 Rust 后端（构建时运行测试） |
 | `packages.x86_64-linux.codex-computer-use` | 指向 Desktop 内置后端的包装脚本 |
+| `packages.x86_64-linux.niri-patched` | 包含窗口坐标和 agent 输入补丁的 Niri（构建时运行测试） |
 | `nixosModules.default` | `programs.codexComputerUse` 模块，已导入上游 `codexDesktopLinux` 模块 |
 
 ## 文档

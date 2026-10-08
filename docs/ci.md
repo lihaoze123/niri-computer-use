@@ -33,7 +33,8 @@ PR 只从公共缓存读取，不上传。没有设置缓存名称时仍会构�
 [cachix-action](https://github.com/cachix/cachix-action) 安装 Cachix 并设置下载缓存源。
 构建、求值和入口检查全部通过后，通过
 [`cachix push`](https://docs.cachix.org/pushing#pushing-runtime-closure)
-上传三个成品包及其运行时依赖，控制缓存占用。上传失败会使工作流失败。
+上传 Desktop、Rust 后端、MCP 包装命令和 `niri-patched` 四个成品包及其运行时依赖，
+控制缓存占用。Niri 构建使用 nixpkgs 的标准构建和测试流程；上传失败会使工作流失败。
 
 ## 在 NixOS 上使用
 
@@ -55,5 +56,24 @@ NixOS 的声明式配置按该命令或 Cachix 的 **Use** 页给出的 URL 和�
 ```
 
 保留系统已有 substituters 和公钥。缓存只命中相同 derivation：系统 flake 中本仓库的
-revision 和传给它的上游依赖须与 CI 一致。CI 缓存后端、Desktop 和 MCP 包装命令；
-宿主 `programs.niri.package` 的补丁构建仍取决于宿主自己的 nixpkgs，不属于这三个包。
+补丁内容和传给它的上游依赖须与 CI 一致。`niri-patched` 使用本仓库独立锁定的
+`nixpkgs`，包含两个 Niri 补丁；NixOS 模块仍使用宿主的 `pkgs.niri`，与 CI 共用
+`packages/niri.nix`。宿主与 CI 的 nixpkgs、依赖覆盖及 `agentInput = true` 一致时，
+模块生成的 Niri 可以命中缓存。只改变无关文件或提交号不会改变该包的 derivation。
+
+单独构建补丁版 Niri：
+
+```bash
+nix build .#niri-patched
+./result/bin/niri --version
+```
+
+更新宿主 nixpkgs 后，可以先将 `flake.nix` 中的 `inputs.nixpkgs.url` 设置为宿主
+锁定的 nixpkgs URL，再只更新这个输入：
+
+```bash
+nix flake update nixpkgs
+```
+
+提交更新后的 `flake.lock` 会触发重新构建并上传。此输入独立于
+`codex-desktop-linux` 的 nixpkgs，不会升级 Desktop 或 Rust 后端的依赖。

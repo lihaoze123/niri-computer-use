@@ -90,11 +90,10 @@ in
     }
 
     (mkIf cfg.patchNiri {
-      programs.niri.package = pkgs.niri.overrideAttrs (old: {
-        patches = (old.patches or [ ])
-          ++ [ ../patches/niri-ipc-tiled-window-position.patch ]
-          ++ lib.optional cfg.agentInput ../patches/niri-agent-input.patch;
-      });
+      programs.niri.package = import ../packages/niri.nix {
+        inherit pkgs;
+        inherit (cfg) agentInput;
+      };
     })
 
     (mkIf cfg.mcpWrapper.enable {
