@@ -2,7 +2,7 @@
 #
 # Everything is built with the nixpkgs pinned by codex-desktop-linux so the
 # Rust backend and the Electron package stay binary-compatible with upstream.
-{ upstream, system }:
+{ upstream, desktopUpstream ? upstream, system }:
 let
   pkgs = import upstream.inputs.nixpkgs {
     inherit system;
@@ -61,7 +61,7 @@ let
 
   pluginDir = "opt/codex-desktop/resources/plugins/openai-bundled/plugins/unified-computer-use";
 
-  desktop = upstream.packages.${system}.codex-desktop-computer-use-ui.overrideAttrs (old: {
+  mkDesktop = base: browserStateFallback: base.overrideAttrs (old: {
     postInstall = (old.postInstall or "") + ''
       install -m755 ${backend}/bin/codex-computer-use-linux \
         "$out/${pluginDir}/bin/codex-computer-use-linux"
@@ -73,9 +73,24 @@ let
         "$out/${pluginDir}/scripts/native-backend-service.mjs"
       install -m644 ${patchedSource}/linux-features/computer-use-linux/native-protocol.mjs \
         "$out/${pluginDir}/scripts/native-protocol.mjs"
+    '' + pkgs.lib.optionalString browserStateFallback ''
+      # New CUA runtimes route getState through the unsupported native Sky proxy.
+      # Build browser state using the runtime's public browser APIs instead.
+      substituteInPlace "$out/${pluginDir}/scripts/native-client.mjs" \
+        --replace-fail 'const browserState = cua.getState?.bind(cua);' \
+        'const listBrowsers = cua.listBrowsers?.bind(cua);
+      const listTabs = cua.listTabs?.bind(cua);
+      const browserState = async () => ({ browsers: !listBrowsers ? [] : await Promise.all(
+        (await listBrowsers({ emit: false })).map(async browser => ({
+          ...browser, tabs: await listTabs({ browser: browser.id, emit: false }),
+        })),
+      ) });'
     '';
     passthru = (old.passthru or { }) // { niriBackend = backend; };
   });
+
+  legacyDesktop = mkDesktop upstream.packages.${system}.codex-desktop-computer-use-ui false;
+  desktop = mkDesktop desktopUpstream.packages.${system}.codex-desktop-computer-use-ui true;
 
   # Stdio entry point for MCP clients such as Claude Code:
   #   codex-computer-use mcp
@@ -86,5 +101,5 @@ let
   '';
 in
 {
-  inherit backend desktop wrapper;
+  inherit backend desktop legacyDesktop wrapper;
 }

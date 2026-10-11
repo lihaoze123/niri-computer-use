@@ -53,7 +53,7 @@ claude mcp add --scope user linux-cua -- codex-computer-use mcp
 ```
 niri-computer-use/
 ├── flake.nix                 # 输出 packages / nixosModules / formatter
-├── flake.lock                # codex-desktop-linux 固定在补丁对应的版本
+├── flake.lock                # 后端固定在补丁对应的版本；Desktop 应用单独锁定
 ├── packages/
 │   ├── codex-desktop.nix     # 补丁源码、Rust 后端、Desktop 覆盖、包装脚本
 │   └── niri.nix              # CI 与 NixOS 模块共用的 Niri 补丁构建

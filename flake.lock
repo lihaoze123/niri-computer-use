@@ -1,9 +1,34 @@
 {
   "nodes": {
+    "codex-desktop-current": {
+      "inputs": {
+        "flake-utils": [
+          "codex-desktop-linux",
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "codex-desktop-linux",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1791636176,
+        "narHash": "sha256-i5En3yRYX2UuqJqSVqOT5h+2Q9knqwmQx25oggpMrNg=",
+        "owner": "ilysenko",
+        "repo": "codex-desktop-linux",
+        "rev": "839dbb50fbd2ad041089981441a82f2460dac455",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ilysenko",
+        "repo": "codex-desktop-linux",
+        "type": "github"
+      }
+    },
     "codex-desktop-linux": {
       "inputs": {
         "flake-utils": "flake-utils",
-        "nixpkgs": "desktop-nixpkgs"
+        "nixpkgs": "nixpkgs"
       },
       "locked": {
         "lastModified": 1790123554,
@@ -39,6 +64,22 @@
     },
     "nixpkgs": {
       "locked": {
+        "lastModified": 1772773019,
+        "narHash": "sha256-E1bxHxNKfDoQUuvriG71+f+s/NT0qWkImXsYZNFFfCs=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_2": {
+      "locked": {
         "lastModified": 1791260994,
         "narHash": "sha256-MFBjw66d4h06MvpW6lIl7RwarLteD0sk859CncGwb1Q=",
         "rev": "151fa4e8ddfdd8dd25d945ad94ed54a13de9f6e4",
@@ -52,8 +93,9 @@
     },
     "root": {
       "inputs": {
+        "codex-desktop-current": "codex-desktop-current",
         "codex-desktop-linux": "codex-desktop-linux",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs_2"
       }
     },
     "systems": {
@@ -68,22 +110,6 @@
       "original": {
         "owner": "nix-systems",
         "repo": "default",
-        "type": "github"
-      }
-    },
-    "desktop-nixpkgs": {
-      "locked": {
-        "lastModified": 1772773019,
-        "narHash": "sha256-E1bxHxNKfDoQUuvriG71+f+s/NT0qWkImXsYZNFFfCs=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "aca4d95fce4914b3892661bcb80b8087293536c6",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "ref": "nixos-unstable",
-        "repo": "nixpkgs",
         "type": "github"
       }
     }

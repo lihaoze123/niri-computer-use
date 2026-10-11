@@ -76,8 +76,19 @@ jobs:
             .#codex-computer-use-niri \
             .#codex-desktop \
             .#codex-computer-use \
-            .#niri-patched > "$RUNNER_TEMP/computer-use-paths"
+            .#niri-patched \
+            .#niri-patched.doc > "$RUNNER_TEMP/computer-use-paths"
           cat "$RUNNER_TEMP/computer-use-paths"
+
+      # Helpers are copied into Desktop and disappear from its runtime closure.
+      # Build and publish both pinned feature sets explicitly, without uploading
+      # their entire build closures (Rust toolchains, source trees, etc.).
+      - name: Build Desktop helper inputs
+        run: |
+          python3 scripts/cache-desktop-helpers.py \
+            .#codex-desktop-legacy .#codex-desktop \
+            >> "$RUNNER_TEMP/computer-use-paths"
+          sort -u -o "$RUNNER_TEMP/computer-use-paths" "$RUNNER_TEMP/computer-use-paths"
 
       # Cargo.lock is read from an applyPatches derivation. A fresh store must
       # realise that source before flake check can evaluate it in read-only mode.

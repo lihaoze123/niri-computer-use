@@ -1,6 +1,20 @@
 # 维护与排障
 
-## 升级上游 codex-desktop-linux
+## 升级 Desktop 应用
+
+应用和 Niri 后端分别锁定。只升级应用时：
+
+```bash
+nix flake update codex-desktop-current
+nix build .#codex-desktop -L
+nix flake check --no-build
+```
+
+推送后等待 CI 完成 Desktop、两份 helpers 和 Niri 文档输出的缓存上传，
+再更新宿主的 `computer-use` 输入。宿主直接使用本仓库的 `codex-desktop`，
+避免另行打包导致缓存路径不同。
+
+## 升级上游 codex-desktop-linux 后端
 
 补丁针对固定版本编写，升级需逐个验证：
 

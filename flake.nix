@@ -7,9 +7,15 @@
     # The patches are written against a specific upstream revision; see
     # docs/patches.md before running `nix flake update`.
     codex-desktop-linux.url = "github:ilysenko/codex-desktop-linux";
+    # Cache the helper feature set used by the newer desktop on the host too.
+    codex-desktop-current = {
+      url = "github:ilysenko/codex-desktop-linux";
+      inputs.nixpkgs.follows = "codex-desktop-linux/nixpkgs";
+      inputs.flake-utils.follows = "codex-desktop-linux/flake-utils";
+    };
   };
 
-  outputs = { self, nixpkgs, codex-desktop-linux }:
+  outputs = { self, nixpkgs, codex-desktop-linux, codex-desktop-current }:
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = f: builtins.listToAttrs (map
@@ -21,11 +27,13 @@
         let
           built = import ./packages/codex-desktop.nix {
             upstream = codex-desktop-linux;
+            desktopUpstream = codex-desktop-current;
             inherit system;
           };
         in
         {
           codex-desktop = built.desktop;
+          codex-desktop-legacy = built.legacyDesktop;
           codex-computer-use-niri = built.backend;
           codex-computer-use = built.wrapper;
           niri-patched = import ./packages/niri.nix {

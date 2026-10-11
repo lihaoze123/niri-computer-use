@@ -33,8 +33,20 @@ PR 只从公共缓存读取，不上传。没有设置缓存名称时仍会构�
 [cachix-action](https://github.com/cachix/cachix-action) 安装 Cachix 并设置下载缓存源。
 构建、求值和入口检查全部通过后，通过
 [`cachix push`](https://docs.cachix.org/pushing#pushing-runtime-closure)
-上传 Desktop、Rust 后端、MCP 包装命令和 `niri-patched` 四个成品包及其运行时依赖，
+上传 Desktop、Rust 后端、MCP 包装命令、`niri-patched`（含文档输出）及其运行时依赖，
 控制缓存占用。Niri 构建使用 nixpkgs 的标准构建和测试流程；上传失败会使工作流失败。
+
+Desktop 会把 `codex-desktop-feature-helpers` 的二进制复制进应用目录，
+因此 helpers 不在 Desktop 的运行闭包中。CI 通过
+`scripts/cache-desktop-helpers.py` 从两个 Desktop derivation 的直接构建输入中
+找到 helpers，显式构建并上传它们及其运行依赖，不上传整个构建闭包。
+`codex-desktop-legacy` 使用补丁对应的旧版上游；默认 `codex-desktop` 使用
+`codex-desktop-current` 输入锁定的新版应用（当前为 26.1007.21434），但保留
+旧版上游构建的 Niri 后端和 JS 适配层，并加入浏览器状态 API 兼容修正。
+新版输入使用与旧版相同的 nixpkgs 和 flake-utils。升级应用只更新
+`codex-desktop-current`，不更新后端补丁依赖。CI 先缓存默认 Desktop 和两份
+helpers，再由宿主更新 `computer-use` 输入；宿主直接使用默认 Desktop 包，
+避免额外 override 导致成品缓存无法命中。
 
 ## 在 NixOS 上使用
 
