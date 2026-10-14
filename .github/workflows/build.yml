@@ -30,8 +30,10 @@ jobs:
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
           extra_nix_config: |
-            cores = 2
-            max-jobs = 2
+            # Public ubuntu-24.04 runners provide four cores and 16 GB RAM.
+            # Use all four cores for one package at a time during Rust compilation.
+            cores = 4
+            max-jobs = 1
 
       - name: Check cache configuration
         id: cache
