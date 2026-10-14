@@ -198,7 +198,7 @@ new file mode 100644
 index 00000000..66cb03df
 --- /dev/null
 +++ b/src/agent_input.rs
-@@ -0,0 +1,1326 @@
+@@ -0,0 +1,1328 @@
 +//! Per-client "virtual focus" input for computer-use agents.
 +//!
 +//! Wayland input objects are per client: every client has its own `wl_pointer` and `wl_keyboard`
@@ -1505,16 +1505,18 @@ index 00000000..66cb03df
 +        f.roundtrip(input_method);
 +        let client = f.client(input_method);
 +        assert_eq!(client.state.grabbed_keymaps.len(), 2);
++        // XKB may serialize U2603 as 0x1002603; check the symbol, not its spelling.
 +        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
 +        let keymap = xkb::Keymap::new_from_string(
 +            &context,
 +            client.state.grabbed_keymaps[1].trim_end_matches('\0').to_owned(),
 +            xkb::KEYMAP_FORMAT_TEXT_V1,
 +            xkb::KEYMAP_COMPILE_NO_FLAGS,
-+        ).unwrap();
++        ).expect("input method received an invalid keymap");
 +        assert_eq!(
 +            keymap.key_get_syms_by_level(Keycode::new(9), 0, 0),
 +            &[xkb::utf32_to_keysym('☃' as u32)],
++            "input method must receive the virtual keyboard's snowman symbol",
 +        );
 +        assert_eq!(client.state.grabbed_keys, vec![1, 1]);
 +        vk.destroy();
@@ -2011,7 +2013,7 @@ index e6203cf3..8ee35de0 100644
                  } else if interface == WlSeat::interface().name {
                      let version = min(version, WlSeat::interface().version);
                      state
-@@ -1042,3 +1061,37 @@ impl Dispatch<ZwpKeyboardShortcutsInhibitorV1, ()> for State {
+@@ -1042,3 +1061,36 @@ impl Dispatch<ZwpKeyboardShortcutsInhibitorV1, ()> for State {
          }
      }
  }
@@ -2033,13 +2035,12 @@ index e6203cf3..8ee35de0 100644
 +    ) {
 +        match event {
 +            zwp_input_method_keyboard_grab_v2::Event::Keymap { fd, size, .. } => {
-+                use std::io::{Read, Seek, SeekFrom};
++                use std::io::{Read, Seek};
 +                let mut keymap = String::new();
 +                let mut file = std::fs::File::from(fd);
-+                // SCM_RIGHTS preserves the sender's file offset; Wayland keymaps start at 0.
-+                file.seek(SeekFrom::Start(0)).unwrap();
++                // The sender may leave the shared file offset at the end after writing.
++                file.rewind().unwrap();
 +                file.take(size.into()).read_to_string(&mut keymap).unwrap();
-+                assert_eq!(keymap.len(), size as usize);
 +                state.grabbed_keymaps.push(keymap);
 +            }
 +            zwp_input_method_keyboard_grab_v2::Event::Key { key, .. } => {
