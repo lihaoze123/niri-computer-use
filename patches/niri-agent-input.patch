@@ -198,7 +198,7 @@ new file mode 100644
 index 00000000..66cb03df
 --- /dev/null
 +++ b/src/agent_input.rs
-@@ -0,0 +1,1316 @@
+@@ -0,0 +1,1326 @@
 +//! Per-client "virtual focus" input for computer-use agents.
 +//!
 +//! Wayland input objects are per client: every client has its own `wl_pointer` and `wl_keyboard`
@@ -1505,7 +1505,17 @@ index 00000000..66cb03df
 +        f.roundtrip(input_method);
 +        let client = f.client(input_method);
 +        assert_eq!(client.state.grabbed_keymaps.len(), 2);
-+        assert!(client.state.grabbed_keymaps[1].contains("U2603"));
++        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
++        let keymap = xkb::Keymap::new_from_string(
++            &context,
++            client.state.grabbed_keymaps[1].trim_end_matches('\0').to_owned(),
++            xkb::KEYMAP_FORMAT_TEXT_V1,
++            xkb::KEYMAP_COMPILE_NO_FLAGS,
++        ).unwrap();
++        assert_eq!(
++            keymap.key_get_syms_by_level(Keycode::new(9), 0, 0),
++            &[xkb::utf32_to_keysym('☃' as u32)],
++        );
 +        assert_eq!(client.state.grabbed_keys, vec![1, 1]);
 +        vk.destroy();
 +        grab.release();
