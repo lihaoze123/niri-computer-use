@@ -36,11 +36,11 @@ programs.dconf.profiles.user.databases = [{
 users.users.<name>.extraGroups = [ "ydotool" ]; # 对 cfg.users 中每个用户
 
 # patchNiri = true
-programs.niri.package = pkgs.niri.overrideAttrs (old: {
-  patches = (old.patches or [ ])
-    ++ [ ./patches/niri-ipc-tiled-window-position.patch ]
-    ++ lib.optional cfg.agentInput ./patches/niri-agent-input.patch;
-});
+programs.niri.package = import ./packages/niri.nix {
+  inherit pkgs;
+  niriSource = inputs.niri-src;
+  agentInput = cfg.agentInput;
+};
 
 # mcpWrapper.enable = true
 environment.systemPackages = [ codex-computer-use ];  # 指向 cfg.package 内的后端
@@ -48,7 +48,7 @@ environment.systemPackages = [ codex-computer-use ];  # 指向 cfg.package 内�
 
 说明：
 
-- niri 补丁作用于**宿主系统**的 `pkgs.niri`（而不是 codex-desktop-linux 的 nixpkgs），所以 niri 版本跟随你的系统 nixpkgs。若补丁与新版 niri 冲突，可暂时设 `patchNiri = false`，代价是平铺窗口上的窗口相对输入会被拒绝。
+- niri 源码固定到本仓库的 `niri-src` 输入；宿主 `pkgs.niri` 提供打包流程、工具链与系统库。构建包含 #4548 兼容调整及 Smithay 输入法 keymap 修复，见 [maintenance.md](maintenance.md)。`patchNiri = false` 会使用宿主原有 niri，平铺窗口上的窗口相对输入可能被拒绝。
 - `toolkit-accessibility` 写入 dconf 的**系统默认数据库**；若用户数据库（例如 Home Manager 的 `dconf.settings`）中显式设为 `false`，用户值优先。
 - 模块本身不启用 `programs.niri`，由宿主配置决定。
 - 包装脚本基于 `cfg.package` 生成，所以自定义 `package` 时 MCP 与 Desktop 仍然使用同一个后端。

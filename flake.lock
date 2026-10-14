@@ -62,6 +62,22 @@
         "type": "github"
       }
     },
+    "niri-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791889142,
+        "narHash": "sha256-btWAVpdpl/43Jms3c+xaNF4EOS0pvTMkVE3jPdzLrhU=",
+        "owner": "niri-wm",
+        "repo": "niri",
+        "rev": "4263c9a17f80fc8019bd474f85b1cc1dcbac785c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "niri-wm",
+        "repo": "niri",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1772773019,
@@ -95,6 +111,7 @@
       "inputs": {
         "codex-desktop-current": "codex-desktop-current",
         "codex-desktop-linux": "codex-desktop-linux",
+        "niri-src": "niri-src",
         "nixpkgs": "nixpkgs_2"
       }
     },

@@ -69,8 +69,9 @@ NixOS 的声明式配置按该命令或 Cachix 的 **Use** 页给出的 URL 和�
 
 保留系统已有 substituters 和公钥。缓存只命中相同 derivation：系统 flake 中本仓库的
 补丁内容和传给它的上游依赖须与 CI 一致。`niri-patched` 使用本仓库独立锁定的
-`nixpkgs`，包含两个 Niri 补丁；NixOS 模块仍使用宿主的 `pkgs.niri`，与 CI 共用
-`packages/niri.nix`。宿主与 CI 的 nixpkgs、依赖覆盖及 `agentInput = true` 一致时，
+`nixpkgs` 和 `niri-src`，包含两个 Niri 补丁及 Smithay 输入法 keymap 修复；
+NixOS 模块与 CI 共用 `packages/niri.nix` 和固定的 niri 源码，宿主的 `pkgs.niri`
+只提供打包流程及依赖。宿主与 CI 的 nixpkgs、依赖覆盖及 `agentInput = true` 一致时，
 模块生成的 Niri 可以命中缓存。只改变无关文件或提交号不会改变该包的 derivation。
 
 单独构建补丁版 Niri：

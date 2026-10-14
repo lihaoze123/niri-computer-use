@@ -3,6 +3,9 @@
 所有 `codex-*` 补丁针对 `ilysenko/codex-desktop-linux` 的固定版本
 `9fb575b70b5ecdff51a0c534a5cbd231288e1058`（见 `flake.lock`）。
 社区后端版本为 `0.4.9-linux-alpha1`，Desktop 版本 `26.917.61114`。
+niri 补丁针对 `4263c9a17f80fc8019bd474f85b1cc1dcbac785c`，源码由 `niri-src` 锁定。
+额外的 `smithay-input-method-keymap.patch` 来自 Smithay #2213，修复 Fcitx5 抓取
+期间的 keymap 同步；详情与移除条件见 [maintenance.md](maintenance.md)。
 
 应用顺序（`packages/codex-desktop.nix`）：
 

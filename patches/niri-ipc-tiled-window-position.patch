@@ -1,6 +1,8 @@
+diff --git a/src/layout/scrolling.rs b/src/layout/scrolling.rs
+index ed85342e..1f3538f5 100644
 --- a/src/layout/scrolling.rs
 +++ b/src/layout/scrolling.rs
-@@ -2414,19 +2414,30 @@
+@@ -2463,19 +2463,30 @@ impl<W: LayoutElement> ScrollingSpace<W> {
      }
  
      pub fn tiles_with_ipc_layouts(&self) -> impl Iterator<Item = (&Tile<W>, WindowLayout)> {
@@ -15,8 +17,6 @@
 -                        ..tile.ipc_layout_template()
 -                    };
 -                    (tile, layout)
--                })
--            })
 +        // Computer-use clients need the position in the current workspace view.
 +        // Upstream leaves this unset for tiled windows to avoid cascading IPC
 +        // updates; this local build accepts that cost for exact input mapping.
@@ -31,7 +31,8 @@
 +                        .enumerate()
 +                        .find(|(_, (candidate, _))| candidate.window().id() == id)
 +                        .map(|(tile_idx, _)| (col_idx, tile_idx))
-+                })
+                 })
+-            })
 +                .expect("rendered scrolling tile must belong to a column");
 +            let layout = WindowLayout {
 +                // Our indices are 1-based, consistent with the actions.

@@ -7,6 +7,11 @@
     # The patches are written against a specific upstream revision; see
     # docs/patches.md before running `nix flake update`.
     codex-desktop-linux.url = "github:ilysenko/codex-desktop-linux";
+    # Track niri independently of nixpkgs; flake.lock pins the tested commit.
+    niri-src = {
+      url = "github:niri-wm/niri";
+      flake = false;
+    };
     # Cache the helper feature set used by the newer desktop on the host too.
     codex-desktop-current = {
       url = "github:ilysenko/codex-desktop-linux";
@@ -15,7 +20,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, codex-desktop-linux, codex-desktop-current }:
+  outputs = { self, nixpkgs, codex-desktop-linux, codex-desktop-current, niri-src }:
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = f: builtins.listToAttrs (map
@@ -38,12 +43,14 @@
           codex-computer-use = built.wrapper;
           niri-patched = import ./packages/niri.nix {
             pkgs = nixpkgs.legacyPackages.${system};
+            niriSource = niri-src;
           };
           default = built.desktop;
         });
 
       nixosModules.default = import ./modules/nixos.nix {
         inherit self codex-desktop-linux;
+        niriSource = niri-src;
       };
 
       formatter = forAllSystems (system:

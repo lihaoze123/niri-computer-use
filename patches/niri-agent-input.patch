@@ -1,8 +1,8 @@
 diff --git a/niri-config/src/lib.rs b/niri-config/src/lib.rs
-index 329b766..25a0cd5 100644
+index 22e0d3db..e69f84ff 100644
 --- a/niri-config/src/lib.rs
 +++ b/niri-config/src/lib.rs
-@@ -1725,6 +1725,7 @@ mod tests {
+@@ -1761,6 +1761,7 @@ mod tests {
                              is_active_in_column: None,
                              is_floating: None,
                              is_window_cast_target: None,
@@ -10,7 +10,7 @@ index 329b766..25a0cd5 100644
                              is_urgent: None,
                              at_startup: None,
                          },
-@@ -1744,6 +1745,7 @@ mod tests {
+@@ -1780,6 +1781,7 @@ mod tests {
                              is_active_in_column: None,
                              is_floating: None,
                              is_window_cast_target: None,
@@ -18,7 +18,7 @@ index 329b766..25a0cd5 100644
                              is_urgent: None,
                              at_startup: None,
                          },
-@@ -1759,6 +1761,7 @@ mod tests {
+@@ -1795,6 +1797,7 @@ mod tests {
                              is_active_in_column: None,
                              is_floating: None,
                              is_window_cast_target: None,
@@ -27,10 +27,10 @@ index 329b766..25a0cd5 100644
                              at_startup: None,
                          },
 diff --git a/niri-config/src/window_rule.rs b/niri-config/src/window_rule.rs
-index f2bc2ad..3c5f943 100644
+index acc9e2e5..762c4843 100644
 --- a/niri-config/src/window_rule.rs
 +++ b/niri-config/src/window_rule.rs
-@@ -134,6 +134,8 @@ pub struct Match {
+@@ -138,6 +138,8 @@ pub struct Match {
      #[knuffel(property)]
      pub is_window_cast_target: Option<bool>,
      #[knuffel(property)]
@@ -40,7 +40,7 @@ index f2bc2ad..3c5f943 100644
      #[knuffel(property)]
      pub at_startup: Option<bool>,
 diff --git a/niri-ipc/src/lib.rs b/niri-ipc/src/lib.rs
-index 0aa3cb4..d04140c 100644
+index c11f2bf6..c41f5fc8 100644
 --- a/niri-ipc/src/lib.rs
 +++ b/niri-ipc/src/lib.rs
 @@ -119,6 +119,122 @@ pub enum Request {
@@ -175,7 +175,7 @@ index 0aa3cb4..d04140c 100644
      /// The version string for the running niri instance.
      Version(String),
      /// Information about connected outputs.
-@@ -1705,6 +1823,17 @@ pub enum Event {
+@@ -1748,6 +1866,17 @@ pub enum Event {
          /// Stream ID of the stopped screencast.
          stream_id: u64,
      },
@@ -195,10 +195,10 @@ index 0aa3cb4..d04140c 100644
  impl From<Duration> for Timestamp {
 diff --git a/src/agent_input.rs b/src/agent_input.rs
 new file mode 100644
-index 0000000..28b0071
+index 00000000..66cb03df
 --- /dev/null
 +++ b/src/agent_input.rs
-@@ -0,0 +1,1214 @@
+@@ -0,0 +1,1316 @@
 +//! Per-client "virtual focus" input for computer-use agents.
 +//!
 +//! Wayland input objects are per client: every client has its own `wl_pointer` and `wl_keyboard`
@@ -627,13 +627,14 @@ index 0000000..28b0071
 +            state.keyboard = None;
 +        }
 +
-+        // Another virtual keyboard (wtype, an IME forwarding keys, ...) may have left a different
-+        // keymap on every client: smithay broadcasts keymap changes to all wl_keyboards. The agent
-+        // sends seat keycodes, so make sure the target client interprets them with the seat keymap.
++        // Virtual input can leave a synthetic keymap active on the shared seat. Agent keycodes
++        // refer to the configured keyboard, so restore it before lookup and modifier calculation,
++        // then synchronize the target client (including after our per-client temporary keymaps).
 +        if events
 +            .iter()
 +            .any(|e| matches!(e, AgentEvent::Key { .. } | AgentEvent::Text { .. }))
 +        {
++            self.restore_configured_keymap();
 +            self.agent_send_seat_keymap(&client);
 +        }
 +
@@ -1413,11 +1414,112 @@ index 0000000..28b0071
 +        }
 +    }
 +}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::tests::client::KeyboardEvent;
++    use crate::tests::fixture::Fixture;
++
++    #[test]
++    fn agent_restores_keymap_after_virtual_keyboard() {
++        let mut f = Fixture::new();
++        f.add_output(1, (1920, 1080));
++        let target = f.add_client();
++        let window = f.client(target).create_window();
++        let surface = window.surface.clone();
++        window.commit();
++        f.roundtrip(target);
++        let window = f.client(target).window(&surface);
++        window.attach_new_buffer();
++        window.ack_last_and_commit();
++        f.roundtrip(target);
++        let window_id = f.niri().layout.windows().next().unwrap().1.id().get();
++
++        // A different client owns real focus; the agent must not move it.
++        let focused = f.add_client();
++        let window = f.client(focused).create_window();
++        window.commit();
++        let focused_surface = window.surface.clone();
++        f.roundtrip(focused);
++        let window = f.client(focused).window(&focused_surface);
++        window.attach_new_buffer();
++        window.ack_last_and_commit();
++        f.roundtrip(focused);
++        let keyboard = f.niri().seat.get_keyboard().unwrap();
++        let original_focus = keyboard.current_focus();
++        assert!(original_focus.is_some());
++
++        let file = f.niri_state().agent_temp_keymap(&['☃']).unwrap();
++        let client = f.client(focused);
++        let seat = client.state.seats.keys().next().unwrap();
++        let vk = client.state.virtual_keyboard_manager.as_ref().unwrap()
++            .create_virtual_keyboard(seat, &client.qh, ());
++        file.with_fd(false, |fd, size| vk.keymap(1, fd, size as u32)).unwrap();
++        vk.key(0, 1, 1);
++        vk.key(1, 1, 0);
++        f.roundtrip(focused);
++        assert!(f.niri().virtual_keyboard_keymap.is_some());
++
++        f.niri_state().agent_input(window_id, vec![AgentEvent::Text {
++            text: "q".into(),
++            unicode_input: AgentUnicodeInput::Keymap,
++        }]).unwrap();
++        f.roundtrip(target);
++        assert!(f.niri().virtual_keyboard_keymap.is_none());
++        assert_eq!(keyboard.current_focus(), original_focus);
++        let events = f.client(target).state.recent_keyboard_events(&surface);
++        let keys: Vec<_> = events.filter_map(|event| match event {
++            KeyboardEvent::Key { key, .. } => Some(*key),
++            _ => None,
++        }).collect();
++        // q is evdev 16 in the configured US keymap, not synthetic keycode 1.
++        assert_eq!(keys, vec![16, 16]);
++        vk.destroy();
++        f.roundtrip(focused);
++    }
++
++    #[test]
++    fn input_method_grab_receives_virtual_keymap_updates() {
++        let mut f = Fixture::new();
++        let input_method = f.add_client();
++        let client = f.client(input_method);
++        let seat = client.state.seats.keys().next().unwrap();
++        let im = client.state.input_method_manager.as_ref().unwrap()
++            .get_input_method(seat, &client.qh, ());
++        let grab = im.grab_keyboard(&client.qh, ());
++        f.roundtrip(input_method);
++        assert_eq!(f.client(input_method).state.grabbed_keymaps.len(), 1);
++
++        // A wtype-style keyboard switches keymaps while the input method owns the grab.
++        let virtual_client = f.add_client();
++        let file = f.niri_state().agent_temp_keymap(&['☃']).unwrap();
++        let client = f.client(virtual_client);
++        let seat = client.state.seats.keys().next().unwrap();
++        let vk = client.state.virtual_keyboard_manager.as_ref().unwrap()
++            .create_virtual_keyboard(seat, &client.qh, ());
++        file.with_fd(false, |fd, size| vk.keymap(1, fd, size as u32)).unwrap();
++        vk.key(0, 1, 1);
++        vk.key(1, 1, 0);
++        f.roundtrip(virtual_client);
++        f.roundtrip(input_method);
++        let client = f.client(input_method);
++        assert_eq!(client.state.grabbed_keymaps.len(), 2);
++        assert!(client.state.grabbed_keymaps[1].contains("U2603"));
++        assert_eq!(client.state.grabbed_keys, vec![1, 1]);
++        vk.destroy();
++        grab.release();
++        im.destroy();
++        f.roundtrip(virtual_client);
++        f.roundtrip(input_method);
++    }
++
++}
 diff --git a/src/handlers/compositor.rs b/src/handlers/compositor.rs
-index f38b293..cf73251 100644
+index aba1509e..48e82c13 100644
 --- a/src/handlers/compositor.rs
 +++ b/src/handlers/compositor.rs
-@@ -76,6 +76,8 @@ impl CompositorHandler for State {
+@@ -75,6 +75,8 @@ impl CompositorHandler for State {
              return;
          }
  
@@ -1426,7 +1528,7 @@ index f38b293..cf73251 100644
          if surface == &root_surface {
              // This is a root surface commit. It might have mapped a previously-unmapped toplevel.
              if let Entry::Occupied(entry) = self.niri.unmapped_windows.entry(surface.clone()) {
-@@ -163,6 +165,12 @@ impl CompositorHandler for State {
+@@ -162,6 +164,12 @@ impl CompositorHandler for State {
                          // requesting activation and mapping.
                          let token = activation_token_data.filter(|token| {
                              token.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT
@@ -1439,7 +1541,7 @@ index f38b293..cf73251 100644
                          });
                          if token.is_some() {
                              ActivateWindow::Yes
-@@ -176,6 +184,31 @@ impl CompositorHandler for State {
+@@ -175,6 +183,31 @@ impl CompositorHandler for State {
                          }
                      });
  
@@ -1472,10 +1574,10 @@ index f38b293..cf73251 100644
                          .parent()
                          .and_then(|parent| self.niri.layout.find_window_and_output(&parent))
 diff --git a/src/handlers/mod.rs b/src/handlers/mod.rs
-index 3532078..050ea59 100644
+index 8ad784ed..4fb84a0e 100644
 --- a/src/handlers/mod.rs
 +++ b/src/handlers/mod.rs
-@@ -121,6 +121,9 @@ impl SeatHandler for State {
+@@ -108,6 +108,9 @@ impl SeatHandler for State {
      fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
          let dh = &self.niri.display_handle;
          let client = focused.and_then(|s| dh.get_client(s.id()).ok());
@@ -1485,16 +1587,16 @@ index 3532078..050ea59 100644
          set_data_device_focus(dh, seat, client.clone());
          set_primary_focus(dh, seat, client);
      }
-@@ -768,7 +771,7 @@ impl GammaControlHandler for State {
+@@ -738,7 +741,7 @@ impl GammaControlHandler for State {
+     }
  }
- delegate_gamma_control!(State);
  
 -struct UrgentOnlyMarker;
 +pub(crate) struct UrgentOnlyMarker;
  
  impl XdgActivationHandler for State {
      fn activation_state(&mut self) -> &mut XdgActivationState {
-@@ -788,6 +791,13 @@ impl XdgActivationHandler for State {
+@@ -758,6 +761,13 @@ impl XdgActivationHandler for State {
              return false;
          };
  
@@ -1509,10 +1611,10 @@ index 3532078..050ea59 100644
          // upon clicking on their tray icon or on their notification. This debug flag makes that
          // work.
 diff --git a/src/handlers/xdg_shell.rs b/src/handlers/xdg_shell.rs
-index 38440c9..a831617 100644
+index 6477d65a..ab3ab46f 100644
 --- a/src/handlers/xdg_shell.rs
 +++ b/src/handlers/xdg_shell.rs
-@@ -273,6 +273,15 @@ impl XdgShellHandler for State {
+@@ -330,6 +330,15 @@ impl XdgShellHandler for State {
              return;
          };
  
@@ -1529,10 +1631,10 @@ index 38440c9..a831617 100644
          // thinks the current focus is, otherwise it will desync and cause weird issues with
          // keyboard focus being at the wrong place.
 diff --git a/src/ipc/client.rs b/src/ipc/client.rs
-index 40a58ef..ba56d61 100644
+index 78022ed9..e851448e 100644
 --- a/src/ipc/client.rs
 +++ b/src/ipc/client.rs
-@@ -506,6 +506,9 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
+@@ -522,6 +522,9 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
                      Event::CastStopped { stream_id } => {
                          println!("Cast stopped: stream id {stream_id}");
                      }
@@ -1543,7 +1645,7 @@ index 40a58ef..ba56d61 100644
              }
          }
 diff --git a/src/ipc/server.rs b/src/ipc/server.rs
-index db71da6..8e202e8 100644
+index 374216c2..5e1337e3 100644
 --- a/src/ipc/server.rs
 +++ b/src/ipc/server.rs
 @@ -17,8 +17,8 @@ use futures_util::{select_biased, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, Fu
@@ -1557,7 +1659,7 @@ index db71da6..8e202e8 100644
  };
  use smithay::desktop::layer_map_for_output;
  use smithay::input::pointer::{
-@@ -455,6 +455,35 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
+@@ -456,6 +456,35 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
              let casts = state.casts.casts.values().cloned().collect();
              Response::Casts(casts)
          }
@@ -1593,7 +1695,7 @@ index db71da6..8e202e8 100644
      };
  
      Ok(response)
-@@ -932,6 +961,15 @@ impl State {
+@@ -973,6 +1002,15 @@ impl State {
          server.send_event(event);
      }
  
@@ -1610,7 +1712,7 @@ index db71da6..8e202e8 100644
          let Some(server) = &self.niri.ipc_server else {
              return;
 diff --git a/src/layout/mod.rs b/src/layout/mod.rs
-index 5c4dd63..076d78c 100644
+index 8575a1af..434b2b02 100644
 --- a/src/layout/mod.rs
 +++ b/src/layout/mod.rs
 @@ -246,6 +246,11 @@ pub trait LayoutElement {
@@ -1626,10 +1728,10 @@ index 5c4dd63..076d78c 100644
      fn send_pending_configure(&mut self);
  
 diff --git a/src/layout/tile.rs b/src/layout/tile.rs
-index 86c7eba..8f482a4 100644
+index db8ce678..7a814c42 100644
 --- a/src/layout/tile.rs
 +++ b/src/layout/tile.rs
-@@ -1074,6 +1074,13 @@ impl<W: LayoutElement> Tile<W> {
+@@ -1112,6 +1112,13 @@ impl<W: LayoutElement> Tile<W> {
              .geometry_corner_radius()
              .scaled_by(1. - expanded_progress as f32);
  
@@ -1644,7 +1746,7 @@ index 86c7eba..8f482a4 100644
          self.window.render_popups(
              ctx.r(),
 diff --git a/src/lib.rs b/src/lib.rs
-index d516838..dec17d5 100644
+index d5168386..dec17d5f 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -3,6 +3,7 @@ extern crate tracing;
@@ -1656,10 +1758,10 @@ index d516838..dec17d5 100644
  pub mod backend;
  pub mod cli;
 diff --git a/src/niri.rs b/src/niri.rs
-index ec40e01..7e10719 100644
+index c2bf92d8..46f02363 100644
 --- a/src/niri.rs
 +++ b/src/niri.rs
-@@ -393,6 +393,7 @@ pub struct Niri {
+@@ -443,6 +443,7 @@ pub struct Niri {
      pub pending_mru_commit: Option<PendingMruCommit>,
  
      pub pick_window: Option<async_channel::Sender<Option<MappedId>>>,
@@ -1667,7 +1769,7 @@ index ec40e01..7e10719 100644
      pub pick_color: Option<async_channel::Sender<Option<niri_ipc::PickedColor>>>,
  
      pub debug_draw_opaque_regions: bool,
-@@ -824,6 +825,8 @@ impl State {
+@@ -883,6 +884,8 @@ impl State {
          #[cfg(feature = "xdp-gnome-screencast")]
          self.niri.refresh_mapped_cast_window_rules();
          self.ipc_refresh_casts();
@@ -1676,7 +1778,7 @@ index ec40e01..7e10719 100644
  
          self.niri.refresh_window_rules();
          self.refresh_ipc_outputs();
-@@ -2604,6 +2607,7 @@ impl Niri {
+@@ -2872,6 +2875,7 @@ impl Niri {
              pending_mru_commit: None,
  
              pick_window: None,
@@ -1684,7 +1786,7 @@ index ec40e01..7e10719 100644
              pick_color: None,
  
              debug_draw_opaque_regions: false,
-@@ -3447,6 +3451,16 @@ impl Niri {
+@@ -3727,6 +3731,16 @@ impl Niri {
              return rv;
          };
  
@@ -1701,7 +1803,7 @@ index ec40e01..7e10719 100644
          if let Some((_, surface_pos)) = &mut surface_and_pos {
              *surface_pos += output_pos_in_global_space.to_f64();
          }
-@@ -5581,6 +5595,21 @@ impl Niri {
+@@ -6261,6 +6275,21 @@ impl Niri {
          show_pointer: bool,
          path: Option<String>,
      ) -> anyhow::Result<()> {
@@ -1723,7 +1825,7 @@ index ec40e01..7e10719 100644
          let _span = tracy_client::span!("Niri::screenshot_window");
  
          let scale = Scale::from(output.current_scale().fractional_scale());
-@@ -5636,8 +5665,10 @@ impl Niri {
+@@ -6316,8 +6345,10 @@ impl Niri {
              elements,
          )?;
  
@@ -1737,7 +1839,7 @@ index ec40e01..7e10719 100644
  
      pub fn save_screenshot(
 diff --git a/src/window/mapped.rs b/src/window/mapped.rs
-index 3db1f66..ca024dd 100644
+index 3db1f66c..ca024dd7 100644
 --- a/src/window/mapped.rs
 +++ b/src/window/mapped.rs
 @@ -22,6 +22,7 @@ use smithay::wayland::shell::xdg::{
@@ -1819,10 +1921,10 @@ index 3db1f66..ca024dd 100644
          let changed = self.toplevel().with_pending_state(|state| {
              if active {
 diff --git a/src/window/mod.rs b/src/window/mod.rs
-index 14527cd..b07040d 100644
+index 771f0d95..64d400e4 100644
 --- a/src/window/mod.rs
 +++ b/src/window/mod.rs
-@@ -177,6 +177,13 @@ impl<'a> WindowRef<'a> {
+@@ -183,6 +183,13 @@ impl<'a> WindowRef<'a> {
              WindowRef::Mapped(mapped) => mapped.is_window_cast_target(),
          }
      }
@@ -1836,7 +1938,7 @@ index 14527cd..b07040d 100644
  }
  
  impl ResolvedWindowRules {
-@@ -445,5 +452,11 @@ fn window_matches(window: WindowRef, role: &XdgToplevelSurfaceRoleAttributes, m:
+@@ -458,5 +465,11 @@ fn window_matches(window: WindowRef, role: &XdgToplevelSurfaceRoleAttributes, m:
          }
      }
  
@@ -1848,3 +1950,102 @@ index 14527cd..b07040d 100644
 +
      true
  }
+diff --git a/src/tests/client.rs b/src/tests/client.rs
+index e6203cf3..8ee35de0 100644
+--- a/src/tests/client.rs
++++ b/src/tests/client.rs
+@@ -26,6 +26,11 @@ use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::client::zwlr_lay
+ };
+ use smithay::reexports::wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1;
+ use smithay::reexports::wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1;
++use smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
++use smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1;
++use smithay::reexports::wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_manager_v2::ZwpInputMethodManagerV2;
++use smithay::reexports::wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_v2::ZwpInputMethodV2;
++use smithay::reexports::wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_keyboard_grab_v2::{self, ZwpInputMethodKeyboardGrabV2};
+ use wayland_backend::client::Backend;
+ use wayland_client::globals::Global;
+ use wayland_client::protocol::wl_buffer::{self, WlBuffer};
+@@ -62,6 +67,10 @@ pub struct State {
+     pub xdg_wm_base: Option<XdgWmBase>,
+     pub layer_shell: Option<ZwlrLayerShellV1>,
+     pub virtual_pointer_manager: Option<ZwlrVirtualPointerManagerV1>,
++    pub virtual_keyboard_manager: Option<ZwpVirtualKeyboardManagerV1>,
++    pub input_method_manager: Option<ZwpInputMethodManagerV2>,
++    pub grabbed_keymaps: Vec<String>,
++    pub grabbed_keys: Vec<u32>,
+     pub spbm: Option<WpSinglePixelBufferManagerV1>,
+     pub viewporter: Option<WpViewporter>,
+     pub ksim: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
+@@ -262,6 +271,10 @@ impl Client {
+             xdg_wm_base: None,
+             layer_shell: None,
+             virtual_pointer_manager: None,
++            virtual_keyboard_manager: None,
++            input_method_manager: None,
++            grabbed_keymaps: Vec::new(),
++            grabbed_keys: Vec::new(),
+             spbm: None,
+             viewporter: None,
+             ksim: None,
+@@ -644,6 +657,12 @@ impl Dispatch<WlRegistry, ()> for State {
+                     let version = min(version, WlOutput::interface().version);
+                     let output = registry.bind(name, version, qh, ());
+                     state.outputs.insert(output, String::new());
++                } else if interface == ZwpVirtualKeyboardManagerV1::interface().name {
++                    let version = min(version, ZwpVirtualKeyboardManagerV1::interface().version);
++                    state.virtual_keyboard_manager = Some(registry.bind(name, version, qh, ()));
++                } else if interface == ZwpInputMethodManagerV2::interface().name {
++                    let version = min(version, ZwpInputMethodManagerV2::interface().version);
++                    state.input_method_manager = Some(registry.bind(name, version, qh, ()));
+                 } else if interface == WlSeat::interface().name {
+                     let version = min(version, WlSeat::interface().version);
+                     state
+@@ -1042,3 +1061,33 @@ impl Dispatch<ZwpKeyboardShortcutsInhibitorV1, ()> for State {
+         }
+     }
+ }
++
++wayland_client::delegate_noop!(State: ZwpVirtualKeyboardManagerV1);
++wayland_client::delegate_noop!(State: ZwpVirtualKeyboardV1);
++
++wayland_client::delegate_noop!(State: ZwpInputMethodManagerV2);
++wayland_client::delegate_noop!(State: ZwpInputMethodV2);
++
++impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for State {
++    fn event(
++        state: &mut Self,
++        _grab: &ZwpInputMethodKeyboardGrabV2,
++        event: zwp_input_method_keyboard_grab_v2::Event,
++        _data: &(),
++        _conn: &Connection,
++        _qh: &QueueHandle<Self>,
++    ) {
++        match event {
++            zwp_input_method_keyboard_grab_v2::Event::Keymap { fd, size, .. } => {
++                use std::io::Read;
++                let mut keymap = String::new();
++                std::fs::File::from(fd).take(size.into()).read_to_string(&mut keymap).unwrap();
++                state.grabbed_keymaps.push(keymap);
++            }
++            zwp_input_method_keyboard_grab_v2::Event::Key { key, .. } => {
++                state.grabbed_keys.push(key);
++            }
++            _ => (),
++        }
++    }
++}
+diff --git a/src/tests/mod.rs b/src/tests/mod.rs
+index ad66c822..7edf5e16 100644
+--- a/src/tests/mod.rs
++++ b/src/tests/mod.rs
+@@ -1,7 +1,7 @@
+ use fixture::Fixture;
+ 
+-mod client;
+-mod fixture;
++pub(crate) mod client;
++pub(crate) mod fixture;
+ mod server;
+ mod test_input_backend;
+ 

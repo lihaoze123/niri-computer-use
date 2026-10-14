@@ -36,7 +36,35 @@ nix build .#codex-desktop -L
 
 ## 升级 niri
 
-niri 补丁作用于宿主系统的 nixpkgs。宿主 `nix flake update` 后若 niri 构建失败，基于新版 `src/layout/scrolling.rs` 重新生成 `niri-ipc-tiled-window-position.patch`，或临时 `patchNiri = false`。
+niri 源码由本仓库的 `niri-src` 输入独立锁定；宿主 nixpkgs 提供工具链和系统库。
+当前固定到主分支 `4263c9a17f80fc8019bd474f85b1cc1dcbac785c`（2026-10-13），
+包含 [niri #4548](https://github.com/niri-wm/niri/pull/4548) 的新虚拟键盘/指针实现。
+
+```bash
+nix flake update niri-src
+nix build .#niri-patched -L --cores 2 --max-jobs 1
+```
+
+更新源码后，需要更新 `packages/niri.nix` 的版本标识与 vendor hash、重新迁移两个
+niri 补丁，并验证实际配置：`./result/bin/niri validate`。
+构建保留上游测试，并覆盖 agent 在临时 keymap 之后输入、输入法抓取接收 keymap 更新的回归场景。
+
+### #4548 的兼容性
+
+- 虚拟键盘现在经过正常输入处理，快捷键、抓取和按键释放行为会随之改变；ydotool
+  的 uinput 路径仍是物理输入。wtype 的临时 keymap 会暂时替换共享 seat keymap。
+- agent 输入必须先调用 `restore_configured_keymap()`，再发送目标客户端的 keymap、
+  查找字符和计算修饰键，避免拿 wtype 的临时映射解释固定 evdev keycode。
+- Fcitx5 抓取键盘期间，Smithay 需要把 keymap 更新同步给输入法，否则 wtype 可能乱码。
+  当前额外回移 [Smithay #2213](https://github.com/Smithay/smithay/pull/2213)，
+  补丁固定在本仓库，应用到 Cargo vendor 中的 Smithay 0.7.0。
+  后续 niri 的 Smithay pin 包含该修复时，应移除这个补丁和 `postPatch` 中的应用步骤。
+- 虚拟键盘只通过 `modifiers` 设置的修饰状态仍共享 seat，设备销毁不保证清空这些状态。
+  脚本应成对释放按键；不要据此删除 Chromium 的独立 Unicode 输入兼容路径。
+- 虚拟指针采用输出变换后的坐标处理；有旋转或混合缩放时需重新检查 VNC 的点击位置。
+
+切换软件包不能替换运行中的 niri。宿主使用图形 greeter 时，按宿主约定部署到下次
+启动并重启，或在安全时完整注销再登录；不要在活动桌面中重启 `niri.service`。
 
 ## 在系统配置中更新本仓库
 

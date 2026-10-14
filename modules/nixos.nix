@@ -1,5 +1,5 @@
 # NixOS module: Codex Desktop Computer Use on niri.
-{ self, codex-desktop-linux }:
+{ self, codex-desktop-linux, niriSource }:
 { config, lib, pkgs, ... }:
 let
   cfg = config.programs.codexComputerUse;
@@ -33,7 +33,8 @@ in
       type = types.bool;
       default = true;
       description = ''
-        Patch programs.niri.package so niri IPC reports tiled-window positions.
+        Use the pinned niri source with tiled-window IPC coordinates and the
+        input-method keymap synchronization fix.
         Without it, window-relative clicks on tiled windows are refused.
         Requires a full logout/login after switching.
       '';
@@ -91,7 +92,7 @@ in
 
     (mkIf cfg.patchNiri {
       programs.niri.package = import ../packages/niri.nix {
-        inherit pkgs;
+        inherit pkgs niriSource;
         inherit (cfg) agentInput;
       };
     })

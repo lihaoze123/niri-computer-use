@@ -5,7 +5,7 @@
 本仓库整理自一份在日常使用中的 NixOS 配置，以独立 flake 的形式提供，包含：
 
 - 基于 [`ilysenko/codex-desktop-linux`](https://github.com/ilysenko/codex-desktop-linux) 的补丁版 Codex Desktop（Rust 后端 `codex-computer-use-linux` + JS 适配层）；
-- 让 niri IPC 报告平铺窗口位置的 niri 补丁；
+- 独立锁定 niri 主分支源码，保留平铺窗口坐标补丁，并回移 Fcitx5 / wtype 的 keymap 同步修复；
 - **agent 输入补丁**（默认开启）：niri 新增 `AgentInput` / `AgentScreenshot` IPC，Computer Use 直接向目标窗口的客户端投递输入、离屏渲染截图——**不移动你的鼠标、不抢键盘焦点、不切换活动窗口，截图不弹通知、不覆盖剪贴板**；agent 操作的窗口里会画出 agent 光标，并可用 `is-agent-driven` 窗口规则高亮；
 - 一个 NixOS 模块，一次性配置好 ydotool、`/dev/uinput`、AT-SPI、dconf 与 niri；
 - `codex-computer-use` 包装脚本，`codex-computer-use mcp` 即为 stdio MCP 服务器。
@@ -59,7 +59,7 @@ niri-computer-use/
 │   └── niri.nix              # CI 与 NixOS 模块共用的 Niri 补丁构建
 ├── modules/
 │   └── nixos.nix             # programs.codexComputerUse 模块
-├── patches/                  # 7 个后端补丁 + 2 个 niri 补丁
+├── patches/                  # 后端、niri 与 Smithay 兼容补丁
 └── docs/
 ```
 
