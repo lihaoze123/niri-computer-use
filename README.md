@@ -40,6 +40,28 @@
 }
 ```
 
+### 二进制缓存（可选，推荐）
+
+CI 会把 `main` 上构建好的 Codex Desktop、Rust 后端、MCP 包装脚本和补丁版 niri 推送到公共 Cachix 缓存，任何人无需登录即可使用，免去本地编译 niri 和 Rust 后端：
+
+```nix
+{
+  nix.settings = {
+    extra-substituters = [ "https://niri-computer-use.cachix.org" ];
+    extra-trusted-public-keys = [
+      "niri-computer-use.cachix.org-1:K5LGfljid+PkRn02OLbwsmngqBCoLkbDi9hRMCnsOTg="
+    ];
+  };
+}
+```
+
+或执行 `cachix use niri-computer-use`。缓存只命中与 CI 完全相同的 derivation：
+
+- Codex Desktop、Rust 后端和 `codex-computer-use` 使用本仓库锁定的依赖，不对本仓库的输入使用 `follows` 即可命中；
+- 模块中的 niri 使用宿主的 `pkgs` 构建，只有宿主 nixpkgs 与本仓库 `flake.lock` 中的 `nixpkgs` 一致、且 `agentInput = true`（默认）时才命中，否则会在本地编译。
+
+新的 substituter 要先生效才会被使用，首次接入时可以先单独 `nixos-rebuild switch` 一次缓存配置。详见 [docs/ci.md](docs/ci.md)。
+
 `sudo nixos-rebuild switch` 之后**注销并重新登录**（niri 补丁只有在新的合成器进程中才生效，`ydotool` 组成员资格也需要新会话）。
 
 然后注册到 Claude Code：
