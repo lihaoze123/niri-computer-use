@@ -25,6 +25,30 @@ claude mcp add --scope user linux-cua -- codex-computer-use mcp
 
 该注册不由 Nix 管理；`codex-computer-use` 必须在 Claude Code 的 `PATH` 中（`mcpWrapper.enable = true` 时装在系统 profile 里）。
 
+## 注册到 Codex CLI
+
+Codex Desktop 内置的 Computer Use（`unified-computer-use` 插件提供的 `cua_repl`）依赖 Desktop 应用的 native pipe，在终端里运行的 Codex CLI 中会报 `native pipe path unavailable`。CLI 下应改用同一个后端的 MCP：
+
+```bash
+codex mcp add codex-computer-use -- codex-computer-use mcp
+```
+
+注意 `--` 后要写完整命令；漏掉程序名（如 `codex mcp add codex-computer-use mcp`）会得到 `command = "mcp"`，服务器无法启动，但 `codex mcp list` 仍显示 `enabled`。
+
+然后在 `~/.codex/config.toml` 中补上 `omit_tools_from`：
+
+```toml
+[mcp_servers.codex-computer-use]
+command = "codex-computer-use"
+args = ["mcp"]
+startup_timeout_sec = 60.0
+omit_tools_from = ["code_mode", "deferred"]
+```
+
+Codex 默认延迟加载 MCP 工具，模型须先搜索才能看到；而 `cua_repl` 在插件里设置了同样的 `omit_tools_from`，始终直接可见。不加这一行时，即使 `/mcp` 显示 `codex-computer-use: connected`，模型仍会优先调用 `cua_repl` 并失败。
+
+`unified-computer-use` 插件与 Desktop 共用 `~/.codex/config.toml`，关闭它会影响 Desktop 中的 Computer Use；`-c 'plugins."unified-computer-use@openai-bundled".enabled=false'` 也不会移除 `cua_repl`，因此保留它即可。修改配置后需重新启动 Codex 会话。
+
 不使用 NixOS 模块时，也可以直接运行：
 
 ```bash
