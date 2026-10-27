@@ -32,6 +32,8 @@ let
     # Uses niri's AgentInput/AgentScreenshot IPC when available (see niri-agent-input.patch);
     # falls back to the patches above otherwise.
     ../patches/codex-niri-agent-input.patch
+    # Temporary: drop once agent-sh/computer-use-linux#301 reaches codex-desktop-linux.
+    ../patches/codex-unavailable-window-backend.patch
   ];
 
   backendSource = pkgs.applyPatches {

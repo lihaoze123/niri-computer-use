@@ -17,11 +17,12 @@ niri 补丁针对 `4263c9a17f80fc8019bd474f85b1cc1dcbac785c`，源码由 `niri-s
 | 4 | `codex-linux-drag-interpolation.patch` | `src/abs_pointer.rs` | 后端 |
 | 5 | `codex-niri-scroll-unicode.patch` | `src/server.rs` | 后端 |
 | 6 | `codex-niri-agent-input.patch` | `src/niri_agent.rs`（新）, `src/server.rs`, `src/screenshot.rs` | 后端 |
+| 6a | `codex-unavailable-window-backend.patch` | `src/server.rs`, `src/main.rs`, `src/windowing/` | 后端（临时） |
 | 7 | `codex-linux-native-launch.patch` | `native-client.mjs`, `native-protocol.mjs`, `native-backend-service.mjs` | 仅 JS |
 | — | `niri-ipc-tiled-window-position.patch` | niri `src/layout/scrolling.rs` | niri |
 | — | `niri-agent-input.patch` | niri `src/agent_input.rs`（新）, IPC, `handlers/` | niri（`agentInput`） |
 
-1–6 构成 `backendSource`，Rust 后端由它构建；7 在其之上生成 `patchedSource`，只从中取 `.mjs` 文件。
+1–6a 构成 `backendSource`，Rust 后端由它构建；7 在其之上生成 `patchedSource`，只从中取 `.mjs` 文件。
 
 ## 1. 窗口截图 — `codex-niri-window-screenshot.patch`
 
@@ -82,6 +83,14 @@ GTK 应用需要在按键按下**之后**收到移动事件才会进入拖拽状
 - 截图坐标按 `AgentScreenshot` 返回的缩放与几何偏移换算成窗口内逻辑坐标（顺带修正了 CSD 阴影导致的 16–22px 偏移）。
 
 其余情况（元素索引点击、未知按键名、无窗口目标、未打补丁的 niri、`CODEX_COMPUTER_USE_NIRI_AGENT=0`）沿用补丁 1–5 的原路径。
+
+## 6a. 失败时的后端标识 — `codex-unavailable-window-backend.patch`（临时）
+
+**问题**：`focused_window`、`activate_window`、`list_windows` 失败（或没有窗口能说明后端）时，上游把 `backend` 写死为 `gnome-shell-introspect`，在 niri 上会把排查引向并不存在的 GNOME 依赖（#2）。
+
+**做法**：这些路径改报 `"unavailable"`，与 CLI `windows` 命令失败时的取值一致。
+
+**移除条件**：修复已提交到 standalone 后端 [agent-sh/computer-use-linux#301](https://github.com/agent-sh/computer-use-linux/pull/301)；合并并同步进 codex-desktop-linux 后，更新 `flake.lock` 时删除本补丁。
 
 ## 回到上游
 

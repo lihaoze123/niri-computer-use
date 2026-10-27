@@ -27,7 +27,7 @@ nix build .#codex-desktop -L
 
 补丁应用失败时：
 
-1. 克隆上游到新版本，按 `docs/patches.md` 中的顺序 `git apply` 1–5，然后 6；
+1. 克隆上游到新版本，按 `docs/patches.md` 中的顺序 `git apply` 1–5，然后 6、6a；
 2. 解决冲突后用 `git diff` 重新生成对应补丁覆盖到 `patches/`；
 3. 如果上游已合并某项修复，从 `packages/codex-desktop.nix` 的列表中删掉该补丁；
 4. 重建后在实机上按 `docs/validation.md` 的场景回归（截图、点击、拖拽、滚动、中文输入、启动应用）。
