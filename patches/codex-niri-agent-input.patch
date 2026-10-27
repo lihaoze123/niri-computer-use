@@ -24,10 +24,10 @@ index a3e7c6a..9beb27a 100644
  mod server;
 diff --git a/computer-use-linux/src/niri_agent.rs b/computer-use-linux/src/niri_agent.rs
 new file mode 100644
-index 0000000..e9b0a4b
+index 0000000..ae7dcb8
 --- /dev/null
 +++ b/computer-use-linux/src/niri_agent.rs
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,231 @@
 +//! niri agent input: deliver input to one window's client and capture windows without moving
 +//! the user's pointer, keyboard focus or active window, and without screenshot notifications
 +//! or clipboard changes.
@@ -180,6 +180,32 @@ index 0000000..e9b0a4b
 +    ))
 +}
 +
++/// Refusals from niri's `agent_input.rs` (niri-agent-input.patch). Matched verbatim to add
++/// recovery guidance; update together with that patch.
++pub const REFUSAL_KEYBOARD_FOCUS: &str = "target client holds the real keyboard focus";
++pub const REFUSAL_POINTER_INTERACTING: &str =
++    "the real pointer is interacting with the target client";
++
++/// How a caller can recover from a niri agent input refusal, if `error` is one.
++pub fn refusal_guidance(error: &str) -> Option<&'static str> {
++    if error.contains(REFUSAL_KEYBOARD_FOCUS) {
++        Some(
++            "The target window's client currently holds the real keyboard focus (this happens right \
++             after activate_window), and niri refuses agent input then so the agent and the user \
++             cannot inject conflicting keyboard streams. Targeted input needs no activation: do not \
++             call activate_window before it. Wait until the user's focus moves elsewhere, then retry.",
++        )
++    } else if error.contains(REFUSAL_POINTER_INTERACTING) {
++        Some(
++            "The user is interacting with the target window's client with the real pointer (for \
++             example dragging or holding a button), and niri refuses agent input until that ends. \
++             Wait a moment, then retry.",
++        )
++    } else {
++        None
++    }
++}
++
 +pub async fn input(window_id: u64, events: Vec<Value>) -> Result<()> {
 +    request(json!({ "AgentInput": { "window_id": window_id, "events": events } }))
 +        .await
@@ -218,6 +244,21 @@ index 0000000..e9b0a4b
 +        Some(other) => bail!("unsupported mouse button {other:?}"),
 +    })
 +}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn refusal_guidance_matches_compositor_refusals() {
++        let focus = refusal_guidance(REFUSAL_KEYBOARD_FOCUS).unwrap();
++        assert!(focus.contains("activate_window"));
++        assert!(focus.contains("retry"));
++        let pointer = refusal_guidance(REFUSAL_POINTER_INTERACTING).unwrap();
++        assert!(pointer.contains("retry"));
++        assert!(refusal_guidance("no window with id 7").is_none());
++    }
++}
 diff --git a/computer-use-linux/src/screenshot.rs b/computer-use-linux/src/screenshot.rs
 index bf321c9..81e112a 100644
 --- a/computer-use-linux/src/screenshot.rs
@@ -243,9 +284,27 @@ index bf321c9..81e112a 100644
      let mut nonce = [0u8; 16];
      getrandom::fill(&mut nonce).map_err(|e| anyhow!("screenshot nonce: {e}"))?;
 diff --git a/computer-use-linux/src/server.rs b/computer-use-linux/src/server.rs
-index ca71e18..1e8045f 100644
+index ca71e18..7bc4017 100644
 --- a/computer-use-linux/src/server.rs
 +++ b/computer-use-linux/src/server.rs
+@@ -250,7 +250,7 @@ impl ComputerUseLinux {
+ 
+     #[tool(
+         name = "activate_window",
+-        description = "Focus a Linux desktop window by window_id, pid, app_id, wm_class, title, or terminal selectors when the compositor permits it.",
++        description = "Focus a Linux desktop window by window_id, pid, app_id, wm_class, title, or terminal selectors when the compositor permits it. On niri with agent input, click/scroll/drag/press_key/type_text with a window target (and relative coordinates for click/drag) need no activation, and niri refuses them for the window holding the real keyboard focus, so do not activate a window before sending it targeted input.",
+         annotations(
+             read_only_hint = false,
+             destructive_hint = false,
+@@ -598,7 +598,7 @@ impl ComputerUseLinux {
+ 
+     #[tool(
+         name = "click",
+-        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata.",
++        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. On niri with agent input, input with a window target (and relative coordinates for click/drag) reaches the window without activating it; do not call activate_window first, because niri refuses agent input to the window holding the real keyboard focus.",
+         annotations(
+             read_only_hint = false,
+             destructive_hint = true,
 @@ -609,6 +609,38 @@ impl ComputerUseLinux {
      async fn click(&self, Parameters(mut params): Parameters<ClickParams>) -> Json<ActionOutput> {
          let received = Some(serde_json::json!(params.clone()));
@@ -285,6 +344,15 @@ index ca71e18..1e8045f 100644
          let mut portal_target_point = None;
          // Raise the target window first (if specified) so the click lands on the
          // intended app rather than whatever is stacked on top at that pixel.
+@@ -1045,7 +1077,7 @@ impl ComputerUseLinux {
+ 
+     #[tool(
+         name = "scroll",
+-        description = "Scroll an element in a direction by a number of pages. With a window target and no x/y/element_index, scrolls at the centre of the targeted window.",
++        description = "Scroll an element in a direction by a number of pages. With a window target and no x/y/element_index, scrolls at the centre of the targeted window. On niri with agent input, input with a window target (and relative coordinates for click/drag) reaches the window without activating it; do not call activate_window first, because niri refuses agent input to the window holding the real keyboard focus.",
+         annotations(
+             read_only_hint = false,
+             destructive_hint = false,
 @@ -1056,6 +1088,51 @@ impl ComputerUseLinux {
      async fn scroll(&self, Parameters(mut params): Parameters<ScrollParams>) -> Json<ActionOutput> {
          let received = Some(serde_json::json!(params.clone()));
@@ -337,6 +405,15 @@ index ca71e18..1e8045f 100644
          let mut portal_target_point = None;
          let units = ((params.pages.unwrap_or(1.0).abs().max(0.1) * 5.0).round() as i32).max(1);
          // Raise/focus the target window first (parity with click) so wheel
+@@ -1381,7 +1458,7 @@ impl ComputerUseLinux {
+ 
+     #[tool(
+         name = "drag",
+-        description = "Drag from one point to another using pixel coordinates.",
++        description = "Drag from one point to another using pixel coordinates. On niri with agent input, input with a window target (and relative coordinates for click/drag) reaches the window without activating it; do not call activate_window first, because niri refuses agent input to the window holding the real keyboard focus.",
+         annotations(
+             read_only_hint = false,
+             destructive_hint = true,
 @@ -1392,6 +1469,33 @@ impl ComputerUseLinux {
      async fn drag(&self, Parameters(mut params): Parameters<DragParams>) -> Json<ActionOutput> {
          let received = Some(serde_json::json!(params.clone()));
@@ -371,6 +448,15 @@ index ca71e18..1e8045f 100644
          let mut portal_target_points = None;
          let window_target = params.window_target();
          if params.relative == Some(true) && window_target.is_none() {
+@@ -1617,7 +1721,7 @@ impl ComputerUseLinux {
+ 
+     #[tool(
+         name = "press_key",
+-        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
++        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. On niri with agent input, input with a window target (and relative coordinates for click/drag) reaches the window without activating it; do not call activate_window first, because niri refuses agent input to the window holding the real keyboard focus.",
+         annotations(
+             read_only_hint = false,
+             destructive_hint = true,
 @@ -1632,6 +1736,27 @@ impl ComputerUseLinux {
          let received = Some(serde_json::json!(params.clone()));
          let input_guard =
@@ -399,6 +485,15 @@ index ca71e18..1e8045f 100644
          let focus = match self.focus_target_for_input(&params.window_target()).await {
              Ok(focus) => focus,
              Err(message) => {
+@@ -1766,7 +1891,7 @@ impl ComputerUseLinux {
+ 
+     #[tool(
+         name = "type_text",
+-        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector.",
++        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. On niri with agent input, input with a window target (and relative coordinates for click/drag) reaches the window without activating it; do not call activate_window first, because niri refuses agent input to the window holding the real keyboard focus.",
+         annotations(
+             read_only_hint = false,
+             destructive_hint = true,
 @@ -1781,6 +1906,23 @@ impl ComputerUseLinux {
          let received = Some(serde_json::json!(params.clone()));
          let mut input_guard =
@@ -469,7 +564,7 @@ index ca71e18..1e8045f 100644
      async fn focus_target_for_input(
          &self,
          target: &WindowTarget,
-@@ -3832,6 +4004,25 @@ fn describe_matching_nodes(nodes: &[&AccessibilityNode]) -> String {
+@@ -3832,6 +4004,33 @@ fn describe_matching_nodes(nodes: &[&AccessibilityNode]) -> String {
          .join("; ")
  }
  
@@ -486,7 +581,15 @@ index ca71e18..1e8045f 100644
 +            Ok(()) => format!(
 +                "Delivered {action} to the target window through niri agent input; the user's pointer, keyboard focus and active window were not changed."
 +            ),
-+            Err(error) => format!("niri agent input failed: {error:#}"),
++            Err(error) => {
++                let error = format!("{error:#}");
++                match crate::niri_agent::refusal_guidance(&error) {
++                    Some(guidance) => {
++                        format!("niri agent input failed for {action}: {error}. {guidance}")
++                    }
++                    None => format!("niri agent input failed for {action}: {error}"),
++                }
++            }
 +        },
 +        received,
 +    })
@@ -495,3 +598,40 @@ index ca71e18..1e8045f 100644
  fn is_plain_left_click(button: Option<&str>, click_count: Option<u32>) -> bool {
      let button = button.unwrap_or("left");
      let click_count = click_count.unwrap_or(1);
+@@ -5698,6 +5897,36 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn niri_agent_output_explains_compositor_refusals() {
++        let Json(output) = niri_agent_output(
++            "click",
++            Err(anyhow::anyhow!(crate::niri_agent::REFUSAL_KEYBOARD_FOCUS)),
++            None,
++        );
++        assert!(!output.ok);
++        assert!(output.message.starts_with(
++            "niri agent input failed for click: target client holds the real keyboard focus. "
++        ));
++        assert!(output.message.contains("do not call activate_window"));
++
++        let Json(output) = niri_agent_output(
++            "drag",
++            Err(anyhow::anyhow!(
++                crate::niri_agent::REFUSAL_POINTER_INTERACTING
++            )),
++            None,
++        );
++        assert!(output.message.contains("Wait a moment, then retry."));
++
++        let Json(output) =
++            niri_agent_output("scroll", Err(anyhow::anyhow!("no window with id 7")), None);
++        assert_eq!(
++            output.message,
++            "niri agent input failed for scroll: no window with id 7"
++        );
++    }
++
+     #[test]
+     fn avatar_cursor_socket_path_is_instance_scoped_and_bounded() {
+         assert_eq!(
