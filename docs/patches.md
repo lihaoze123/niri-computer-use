@@ -88,7 +88,7 @@ GTK 应用需要在按键按下**之后**收到移动事件才会进入拖拽状
 
 **问题**：`focused_window`、`activate_window`、`list_windows` 失败（或没有窗口能说明后端）时，上游把 `backend` 写死为 `gnome-shell-introspect`，在 niri 上会把排查引向并不存在的 GNOME 依赖（#2）。
 
-**做法**：这些路径改报 `"unavailable"`，与 CLI `windows` 命令失败时的取值一致。
+**做法**：这些失败路径改报 `"unavailable"`，与 CLI `windows` 命令失败时的取值一致。`focused_window` 查询成功但没有窗口获得焦点时，报告实际应答的后端。
 
 **移除条件**：修复已提交到 standalone 后端 [agent-sh/computer-use-linux#301](https://github.com/agent-sh/computer-use-linux/pull/301)；合并并同步进 codex-desktop-linux 后，更新 `flake.lock` 时删除本补丁。
 
