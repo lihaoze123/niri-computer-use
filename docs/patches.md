@@ -81,6 +81,8 @@ GTK 应用需要在按键按下**之后**收到移动事件才会进入拖拽状
 - 带窗口目标的 `click` / `scroll` / `drag` / `press_key` / `type_text` 走 `AgentInput`，**不调用** `focus_target_for_input`（它会激活窗口）；
 - niri 窗口截图走 `AgentScreenshot`，`screenshot` 不再抬起窗口；
 - 截图坐标按 `AgentScreenshot` 返回的缩放与几何偏移换算成窗口内逻辑坐标（顺带修正了 CSD 阴影导致的 16–22px 偏移）。
+- `activate_window` 与各输入工具的描述说明：有 agent 输入时定向输入不需要激活窗口（窗口持有真实焦点时也能投递）；
+- 失败消息带上动作名（`niri agent input failed for click: …`）。
 
 其余情况（元素索引点击、未知按键名、无窗口目标、未打补丁的 niri、`CODEX_COMPUTER_USE_NIRI_AGENT=0`）沿用补丁 1–5 的原路径。
 

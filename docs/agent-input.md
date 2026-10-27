@@ -49,9 +49,9 @@ smithay 公开的 `PointerHandle::client_pointers` / `KeyboardHandle::client_key
 
 | 问题 | 处理 |
 | --- | --- |
-| 目标客户端持有真实键盘焦点 | 拒绝（`target client holds the real keyboard focus`）：事件不带 surface，客户端无法区分两路输入 |
+| 目标客户端持有真实键盘焦点（例如刚 `activate_window`） | 不拒绝。agent 按键与真实键盘共用一路：直接发到真实焦点所在的 surface，不另发 enter/leave；agent 松开所有键后把你的修饰键状态同步回去。期间你在该窗口打的字会和 agent 的混在一起 |
 | 真实指针只是悬停在目标客户端上 | 不拒绝。agent 发指针事件期间**挡住真实指针**：真实指针先 leave 该客户端的 surface，此后 niri 不让它聚焦该客户端（相当于悬停在空白处，点击和滚轮不会送达）；最后一次 agent 指针输入 600 ms 后（agent 按住按钮时一直保持，最长 30 秒）解除，agent 先 leave，真实指针再重新 enter。只发键盘事件时不挡 |
-| 真实指针正在该客户端里拖拽或按住按钮（pointer grab） | 拒绝（`the real pointer is interacting with the target client`） |
+| 真实指针正在该客户端里拖拽或按住按钮（pointer grab） | 不拒绝。grab 期间挡不开真实指针，agent 的指针事件和你的拖拽混在一起 |
 | 其他虚拟键盘（wtype、输入法转发）把 keymap 广播给所有客户端 | 发键前只给目标客户端补发 seat keymap |
 | Chromium 用 agent 点击的 serial 申请 xdg-activation | niri 记录 agent 发出的 serial，此类请求降级为 urgent |
 | 已降级为 urgent 的激活 token 仍让新窗口聚焦（niri 原有问题） | 修正：urgency-only token 不聚焦新窗口 |
@@ -96,8 +96,8 @@ window-rule {
 ## 已知限制
 
 - **旧版 niri-ipc 客户端**：用旧版 `niri-ipc` crate 解析 event-stream 的程序（包括未打补丁的 `niri msg event-stream`）不认识 `AgentInputActivity`，收到时会报反序列化错误。waybar 的 niri 模块只处理自己认识的事件，不受影响。
-- **悬停时的指针状态**：agent 操作期间你悬停在它窗口上时，光标变成默认箭头，点击不会送达该窗口（但仍会像点击空白处一样聚焦该窗口，之后 agent 的键盘输入会被拒绝）。
-- **同一进程冲突**：你和 agent 不能同时使用同一个客户端的窗口（例如同一个 Edge 进程的两个窗口）。让 agent 使用单独的浏览器 profile。
+- **悬停时的指针状态**：agent 操作期间你悬停在它窗口上时，光标变成默认箭头，点击不会送达该窗口（但仍会像点击空白处一样聚焦该窗口，之后 agent 的按键改走你的键盘焦点）。
+- **同一进程冲突**：agent 操作期间不会因为你使用同一个客户端而失败，但客户端分不清两路输入：你在同一客户端（例如同一个 Edge 进程的另一个窗口）里打字或拖拽时，输入会和 agent 的混在一起。让 agent 使用单独的浏览器 profile。
 - agent 窗口里剪贴板不可用（`set_selection` 需要真实键盘焦点），文本请用 `type_text`。
 - 不支持 Wayland DnD（`start_drag` 校验 seat grab serial）；应用内部的按住拖拽可用。
 - 少数应用若只看 `xdg_toplevel` 的 activated 状态处理输入，可能不响应；kitty、GTK4、Chromium 已验证可用。

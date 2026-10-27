@@ -72,7 +72,7 @@ nix run github:lihaoze123/niri-computer-use#codex-computer-use -- mcp
 
 ## 与 agent 输入配合（`agentInput = true`）
 
-带窗口目标（`window_id`、`app_id` 等）的 `screenshot`、`click`、`scroll`、`drag`、`press_key`、`type_text` 不会激活窗口，也不移动你的鼠标；结果消息会写明 "through niri agent input"。若你正在使用目标窗口所在的程序，调用会被拒绝（`target client holds the real pointer/keyboard focus`），这是有意为之：同一客户端无法区分两路输入。建议让 agent 使用单独的浏览器 profile/进程。
+带窗口目标（`window_id`、`app_id` 等）的 `screenshot`、`click`、`scroll`、`drag`、`press_key`、`type_text` 不会激活窗口，也不移动你的鼠标；结果消息会写明 "through niri agent input"。目标窗口有没有焦点都可以操作，定向输入前不需要 `activate_window`。agent 操作不会因为你同时在用该程序而失败，但同一客户端分不清两路输入：你中途在里面打字或拖拽，会和 agent 的输入混在一起。建议让 agent 使用单独的浏览器 profile/进程。
 
 ### 让 agent 启动的程序不抢焦点
 
