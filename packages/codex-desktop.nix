@@ -34,6 +34,8 @@ let
     ../patches/codex-niri-agent-input.patch
     # Temporary: drop once agent-sh/computer-use-linux#301 reaches codex-desktop-linux.
     ../patches/codex-unavailable-window-backend.patch
+    # Console viewers need time to forward each character to the guest.
+    ../patches/codex-paced-console-input.patch
   ];
 
   backendSource = pkgs.applyPatches {
