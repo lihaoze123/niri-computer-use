@@ -18,11 +18,12 @@ niri 补丁针对 `4263c9a17f80fc8019bd474f85b1cc1dcbac785c`，源码由 `niri-s
 | 5 | `codex-niri-scroll-unicode.patch` | `src/server.rs` | 后端 |
 | 6 | `codex-niri-agent-input.patch` | `src/niri_agent.rs`（新）, `src/server.rs`, `src/screenshot.rs` | 后端 |
 | 6a | `codex-unavailable-window-backend.patch` | `src/server.rs`, `src/main.rs`, `src/windowing/` | 后端（临时） |
+| 6b | `codex-paced-console-input.patch` | `src/niri_agent.rs`, `src/server.rs` | 后端 |
 | 7 | `codex-linux-native-launch.patch` | `native-client.mjs`, `native-protocol.mjs`, `native-backend-service.mjs` | 仅 JS |
 | — | `niri-ipc-tiled-window-position.patch` | niri `src/layout/scrolling.rs` | niri |
 | — | `niri-agent-input.patch` | niri `src/agent_input.rs`（新）, IPC, `handlers/` | niri（`agentInput`） |
 
-1–6a 构成 `backendSource`，Rust 后端由它构建；7 在其之上生成 `patchedSource`，只从中取 `.mjs` 文件。
+1–6b 构成 `backendSource`，Rust 后端由它构建；7 在其之上生成 `patchedSource`，只从中取 `.mjs` 文件。
 
 ## 1. 窗口截图 — `codex-niri-window-screenshot.patch`
 
@@ -93,6 +94,14 @@ GTK 应用需要在按键按下**之后**收到移动事件才会进入拖拽状
 **做法**：这些失败路径改报 `"unavailable"`，与 CLI `windows` 命令失败时的取值一致。`focused_window` 查询成功但没有窗口获得焦点时，报告实际应答的后端。
 
 **移除条件**：修复已提交到 standalone 后端 [agent-sh/computer-use-linux#301](https://github.com/agent-sh/computer-use-linux/pull/301)；合并并同步进 codex-desktop-linux 后，更新 `flake.lock` 时删除本补丁。
+
+## 6b. 虚拟机控制台文本节流 — `codex-paced-console-input.patch`
+
+**问题**：通过 virt-manager 的 SPICE 控制台向虚拟机输入长文本时，一次 `AgentInput` 中连续发送所有字符会出现漏字或按键重复。
+
+**做法**：目标 app id 包含 `virt-manager`、`virt-viewer` 或 `remote-viewer` 时，`type_text` 每次发送一个字符，并在后端异步等待 100 ms。等待发生在 MCP/Desktop 后端，不阻塞合成器的事件循环；投递失败时返回错误，不重放已经发送的文本。其他应用保留原来的批量路径。
+
+该修复覆盖字符发送节奏，不提供额外的访客 Unicode 输入能力；目前实机验证范围为 ASCII 字母、数字、标点、重复字符和换行。
 
 ## 回到上游
 
